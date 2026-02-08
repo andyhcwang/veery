@@ -1,0 +1,32 @@
+# VoiceFlow configuration — all values are optional (defaults are sensible)
+# Uncomment and modify as needed.
+
+# audio:
+#   sample_rate: 16000
+#   chunk_duration_ms: 100
+#   max_duration_sec: 30.0
+
+# vad:
+#   threshold: 0.5
+#   silence_duration_sec: 1.5
+
+# stt:
+#   model_name: "iic/SenseVoiceSmall"
+#   language: "auto"
+
+# grammar:
+#   model_name: "mlx-community/Qwen2.5-3B-Instruct-4bit"
+#   enabled: true
+#   lazy_load: true
+
+# jargon:
+#   dict_paths:
+#     - "jargon/quant_finance.yaml"
+#     - "jargon/tech.yaml"
+#   fuzzy_threshold: 85
+
+# hotkey:
+#   key_combo: "cmd+shift+space"
+
+# output:
+#   cgevent_char_limit: 500

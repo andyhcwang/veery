@@ -1,0 +1,60 @@
+# Tech Domain Jargon
+# Format: canonical_form: [phonetic_variants_the_STT_might_produce]
+
+terms:
+  pytest:
+    - pie test
+    - py test
+  Ruff:
+    - ruff
+  DuckDB:
+    - duck DB
+    - duck dee bee
+  MLX:
+    - mlx
+    - m l x
+  PyTorch:
+    - pie torch
+    - py torch
+  NumPy:
+    - num pie
+    - numpy
+  pandas:
+    - pandas
+    - panda
+  DataFrame:
+    - data frame
+    - dataframe
+  GitHub:
+    - git hub
+    - github
+  Docker:
+    - docker
+  Kubernetes:
+    - kubernetes
+    - k8s
+    - kube
+  API:
+    - a p i
+    - api
+  JSON:
+    - jason
+    - j son
+  YAML:
+    - yaml
+    - y a m l
+  SQLite:
+    - sq lite
+    - sqlite
+  PostgreSQL:
+    - postgres q l
+    - postgresql
+    - postgres
+  Redis:
+    - redis
+  FastAPI:
+    - fast api
+    - fast a p i
+  uvicorn:
+    - uvicorn
+    - u v corn

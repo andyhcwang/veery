@@ -1,0 +1,118 @@
+"""Configuration dataclasses with sensible defaults. Optional YAML override via config.yaml."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+# Project root (two levels up from this file: src/voiceflow/config.py → voiceflow/)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+@dataclass(frozen=True)
+class AudioConfig:
+    sample_rate: int = 16000
+    channels: int = 1
+    chunk_duration_ms: int = 96  # 96ms chunks → 1536 samples at 16kHz (Silero VAD supported size)
+    max_duration_sec: float = 30.0  # Max recording length before auto-stop
+
+    @property
+    def chunk_samples(self) -> int:
+        return int(self.sample_rate * self.chunk_duration_ms / 1000)
+
+    @property
+    def max_buffer_samples(self) -> int:
+        return int(self.sample_rate * self.max_duration_sec)
+
+
+@dataclass(frozen=True)
+class VADConfig:
+    threshold: float = 0.5  # Speech probability threshold
+    silence_duration_sec: float = 1.5  # Silence after speech → stop
+    min_speech_duration_sec: float = 0.3  # Minimum speech to count as valid
+
+
+@dataclass(frozen=True)
+class STTConfig:
+    model_name: str = "iic/SenseVoiceSmall"
+    language: str = "auto"  # Auto-detect for code-switching
+    device: str = "cpu"  # CPU is more reliable than MPS on macOS
+
+
+@dataclass(frozen=True)
+class GrammarConfig:
+    model_name: str = "mlx-community/Qwen2.5-3B-Instruct-4bit"  # Fallback if Qwen3 unavailable
+    temperature: float = 0.3
+    max_tokens: int = 512
+    enabled: bool = True  # Can disable to skip grammar correction
+    lazy_load: bool = True  # Load on first use, not at startup
+    max_output_ratio: float = 2.0  # Discard if output > 2x input length (hallucination guard)
+
+
+@dataclass(frozen=True)
+class JargonConfig:
+    dict_paths: tuple[str, ...] = ("jargon/quant_finance.yaml", "jargon/tech.yaml")
+    learned_path: str | None = "jargon/learned.yaml"  # Tier 2: auto-learned terms
+    fuzzy_threshold: int = 85  # rapidfuzz score_cutoff (0-100)
+    max_phrase_words: int = 3  # Try 3-word, 2-word, 1-word phrases
+
+
+@dataclass(frozen=True)
+class LearningConfig:
+    enabled: bool = True
+    learned_path: str = "jargon/learned.yaml"
+    promotion_threshold: int = 3
+    correction_hotkey: str = "cmd+shift+r"
+
+
+@dataclass(frozen=True)
+class HotkeyConfig:
+    key_combo: str = "cmd+shift+space"
+
+
+@dataclass(frozen=True)
+class OutputConfig:
+    cgevent_char_limit: int = 500  # Use CGEvent typing below this, clipboard above
+    paste_delay_ms: int = 50  # Delay between clipboard write and Cmd+V
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    audio: AudioConfig = field(default_factory=AudioConfig)
+    vad: VADConfig = field(default_factory=VADConfig)
+    stt: STTConfig = field(default_factory=STTConfig)
+    grammar: GrammarConfig = field(default_factory=GrammarConfig)
+    jargon: JargonConfig = field(default_factory=JargonConfig)
+    hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)
+
+
+def load_config(config_path: Path | None = None) -> AppConfig:
+    """Load config from YAML file, falling back to defaults for missing fields."""
+    if config_path is None:
+        config_path = PROJECT_ROOT / "config.yaml"
+
+    if not config_path.exists():
+        return AppConfig()
+
+    with open(config_path) as f:
+        raw = yaml.safe_load(f) or {}
+
+    return AppConfig(
+        audio=AudioConfig(**raw.get("audio", {})),
+        vad=VADConfig(**raw.get("vad", {})),
+        stt=STTConfig(**raw.get("stt", {})),
+        grammar=GrammarConfig(**raw.get("grammar", {})),
+        jargon=JargonConfig(
+            **{
+                k: tuple(v) if k == "dict_paths" and isinstance(v, list) else v
+                for k, v in raw.get("jargon", {}).items()
+            }
+        ),
+        hotkey=HotkeyConfig(**raw.get("hotkey", {})),
+        output=OutputConfig(**raw.get("output", {})),
+        learning=LearningConfig(**raw.get("learning", {})),
+    )

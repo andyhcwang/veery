@@ -1,0 +1,57 @@
+# Quant Finance Domain Jargon
+# Format: canonical_form: [phonetic_variants_the_STT_might_produce]
+
+terms:
+  Sharpe ratio:
+    - sharp ratio
+    - sharpe ratio
+    - sharp issue
+  TWAP:
+    - tee wap
+    - t wap
+    - tea wop
+  VWAP:
+    - vee wap
+    - v wap
+  DuckDB:
+    - duck DB
+    - duck dee bee
+    - duckdb
+  perpetual futures:
+    - perpetual futures
+    - perp futures
+    - perps
+  funding rate:
+    - funding rate
+    - fund rate
+  basis points:
+    - basis points
+    - bips
+    - bps
+  drawdown:
+    - draw down
+    - drawdown
+  Sortino ratio:
+    - sortino ratio
+    - sort tino ratio
+  alpha:
+    - alpha
+  beta:
+    - beta
+  gamma:
+    - gamma
+  delta:
+    - delta
+  PnL:
+    - p and l
+    - p n l
+    - pnl
+    - P&L
+  GMV:
+    - gmv
+    - g m v
+    - gross market value
+  NAV:
+    - nav
+    - n a v
+    - net asset value

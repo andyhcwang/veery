@@ -1,0 +1,57 @@
+[project]
+name = "voiceflow"
+version = "0.1.0"
+description = "macOS bilingual dictation with domain jargon support"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    # Audio
+    "sounddevice>=0.5",
+    "numpy>=2.0",
+    # VAD
+    "onnxruntime>=1.17",
+    # STT
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "funasr>=1.1",
+    # Pin llvmlite/numba for Python 3.13 compat (funasr→umap-learn→pynndescent→llvmlite)
+    "llvmlite>=0.44",
+    "numba>=0.61",
+    # Grammar LLM
+    "mlx>=0.22",
+    "mlx-lm>=0.21",
+    # Jargon
+    "rapidfuzz>=3.6",
+    "pyyaml>=6.0",
+    # macOS app
+    "rumps>=0.4",
+    "pynput>=1.7",
+    "pyobjc-framework-Cocoa>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+]
+
+[project.scripts]
+voiceflow = "voiceflow.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voiceflow"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "PD"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
