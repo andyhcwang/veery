@@ -12,7 +12,7 @@ import webbrowser
 
 import rumps
 
-from voiceflow import __version__
+from voiceflow import __version__, sounds
 from voiceflow.audio import AudioRecorder
 from voiceflow.config import PROJECT_ROOT, STT_BACKENDS, AppConfig, load_config
 from voiceflow.corrector import TextCorrector
@@ -333,6 +333,7 @@ class VoiceFlowApp(rumps.App):
         self.title = "\U0001f534"  # red circle
         self._detail_item.title = "Recording..."
         self._overlay.show_recording()
+        sounds.play_start()
 
         if self._recorder is not None:
             try:
@@ -377,6 +378,7 @@ class VoiceFlowApp(rumps.App):
     def _stop_recording(self) -> None:
         """Stop the current recording and process all captured audio."""
         logger.info("Recording stopped by user, processing...")
+        sounds.play_stop()
         if self._recorder is None:
             self._set_state(State.IDLE)
             return
@@ -541,17 +543,25 @@ class VoiceFlowApp(rumps.App):
 
     def _on_about(self, _sender) -> None:
         """Show About dialog."""
-        response = rumps.alert(
-            title=f"VoiceFlow v{__version__}",
-            message=(
-                "macOS bilingual dictation for EN/ZH professionals.\n\n"
-                "Author: Haocheng Wang\n"
-                "X: x.com/AndyThinkMode"
-            ),
-            ok="Close",
-            other="Open X Profile",
+        from AppKit import NSAlert, NSInformationalAlertStyle
+
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"VoiceFlow v{__version__}")
+        alert.setInformativeText_(
+            "macOS bilingual dictation for EN/ZH professionals.\n\n"
+            "Author: Andy Wang\n"
+            "GitHub: github.com/andyhcwang/voiceflow\n"
+            "X: x.com/AndyThinkMode"
         )
-        if response == 0:  # "Other" button
+        alert.setAlertStyle_(NSInformationalAlertStyle)
+        alert.addButtonWithTitle_("Close")
+        alert.addButtonWithTitle_("Open GitHub")
+        alert.addButtonWithTitle_("Open X")
+
+        response = alert.runModal()
+        if response == 1001:  # Open GitHub
+            webbrowser.open("https://github.com/andyhcwang/voiceflow")
+        elif response == 1002:  # Open X
             webbrowser.open("https://x.com/AndyThinkMode")
 
     def _on_quit(self, _sender) -> None:
@@ -571,15 +581,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="VoiceFlow bilingual dictation")
     parser.add_argument("--mine", nargs="+", metavar="PATH",
                         help="Scan paths for potential jargon terms")
+    parser.add_argument("--mine-output", metavar="PATH", default="jargon/mined.yaml",
+                        help="Output path for mined jargon YAML (default: jargon/mined.yaml)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     if args.mine:
-        from voiceflow.miner import mine_terms, print_mining_report
+        from voiceflow.miner import mine_terms, print_mining_report, write_mined_yaml
         scan_paths = [Path(p).expanduser().resolve() for p in args.mine]
+        output_path = Path(args.mine_output)
         results = mine_terms(scan_paths)
-        print_mining_report(results)
+        written_count = write_mined_yaml(results, output_path, scan_paths)
+        print_mining_report(results, written_count=written_count, output_path=output_path)
         return
 
     app = VoiceFlowApp()

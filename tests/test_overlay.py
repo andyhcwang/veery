@@ -36,6 +36,7 @@ def mock_appkit():
     mod._NSView = MagicMock()
     mod._NSBezierPath = MagicMock()
     mod._NSTimer = MagicMock()
+    mod._NSGlassEffectView = MagicMock()
     mod._NSVisualEffectView = MagicMock()
     mod._NSAnimationContext = MagicMock()
 
@@ -280,4 +281,4 @@ class TestOverlayConstants:
         assert _BG_RED == 0.08
         assert _BG_GREEN == 0.08
         assert _BG_BLUE == 0.08
-        assert _BG_ALPHA == 0.92
+        assert _BG_ALPHA == 0.78

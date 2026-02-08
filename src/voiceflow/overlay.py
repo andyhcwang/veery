@@ -28,7 +28,8 @@ _NSScreen = None
 _NSView = None
 _NSBezierPath = None
 _NSTimer = None
-_NSVisualEffectView = None
+_NSGlassEffectView = None  # macOS Tahoe+ (Liquid Glass)
+_NSVisualEffectView = None  # fallback for older macOS
 _NSAnimationContext = None
 _loaded = False
 
@@ -42,7 +43,7 @@ _PILL_TOP_OFFSET = 60
 _BG_RED = 0.08
 _BG_GREEN = 0.08
 _BG_BLUE = 0.08
-_BG_ALPHA = 0.92
+_BG_ALPHA = 0.78
 
 _RECORDING_DOT_RED = 1.0
 _RECORDING_DOT_GREEN = 0.231
@@ -59,7 +60,8 @@ _overlay_ref = None  # type: OverlayIndicator | None
 def _ensure_appkit() -> bool:
     """Lazy-load AppKit classes. Returns True if available."""
     global _NSPanel, _NSColor, _NSTextField, _NSFont, _NSScreen, _NSView
-    global _NSBezierPath, _NSTimer, _NSVisualEffectView, _NSAnimationContext, _loaded
+    global _NSBezierPath, _NSTimer, _NSGlassEffectView, _NSVisualEffectView
+    global _NSAnimationContext, _loaded
     if _loaded:
         return True
     try:
@@ -73,6 +75,7 @@ def _ensure_appkit() -> bool:
         _NSView = AppKit.NSView
         _NSBezierPath = AppKit.NSBezierPath
         _NSTimer = AppKit.NSTimer
+        _NSGlassEffectView = getattr(AppKit, "NSGlassEffectView", None)
         _NSVisualEffectView = AppKit.NSVisualEffectView
         _NSAnimationContext = AppKit.NSAnimationContext
         _loaded = True
@@ -262,7 +265,10 @@ class OverlayIndicator:
             panel.setCollectionBehavior_(1 << 0)  # canJoinAllSpaces
             panel.setAlphaValue_(0.0)
 
-            # Native blur background (NSVisualEffectView)
+            # Blur background — NSVisualEffectView with hudWindow material.
+            # NSGlassEffectView (Liquid Glass) is available on Tahoe but requires
+            # vibrancy-aware text rendering for legibility; revisit when adopting
+            # NSTextField vibrancy or SwiftUI bridging.
             has_blur = False
             if _NSVisualEffectView is not None:
                 try:
@@ -271,7 +277,7 @@ class OverlayIndicator:
                     )
                     blur_view.setBlendingMode_(1)  # behindWindow
                     blur_view.setState_(1)  # active
-                    blur_view.setMaterial_(13)  # hudWindow
+                    blur_view.setMaterial_(12)  # popover (lighter than hudWindow)
                     blur_view.setWantsLayer_(True)
                     blur_view.layer().setCornerRadius_(_PILL_RADIUS)
                     blur_view.layer().setMasksToBounds_(True)
@@ -280,8 +286,10 @@ class OverlayIndicator:
                     )
                     if dark is not None:
                         blur_view.setAppearance_(dark)
+                    blur_view.setAlphaValue_(0.78)
                     panel.contentView().addSubview_(blur_view)
                     has_blur = True
+                    logger.debug("Using NSVisualEffectView fallback")
                 except Exception:
                     logger.debug("NSVisualEffectView unavailable, using solid background")
 
