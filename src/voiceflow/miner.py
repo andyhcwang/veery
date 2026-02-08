@@ -386,7 +386,7 @@ def print_mining_report(
         print(f"\nWrote {written_count} new terms to {output_path}")
         print("Terms will be active on next launch (jargon/mined.yaml is loaded by default).")
     elif new_count > 0:
-        print(f"\nTo add terms, append them to jargon/quant_finance.yaml or jargon/tech.yaml")
+        print("\nTo add terms, append them to jargon/quant_finance.yaml or jargon/tech.yaml")
         print("Format:")
         print("  TermName:")
         print("    - variant spelling 1")

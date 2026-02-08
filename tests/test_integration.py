@@ -10,11 +10,11 @@ import numpy as np
 import pytest
 
 from voiceflow.config import (
+    PROJECT_ROOT,
     AppConfig,
     AudioConfig,
     JargonConfig,
     OutputConfig,
-    PROJECT_ROOT,
     STTConfig,
     VADConfig,
     load_config,

@@ -10,7 +10,6 @@ import yaml
 from voiceflow.config import JargonConfig
 from voiceflow.jargon import JargonCorrector, JargonDictionary, _consonant_skeleton
 
-
 # ---------------------------------------------------------------------------
 # Consonant skeleton tests
 # ---------------------------------------------------------------------------
