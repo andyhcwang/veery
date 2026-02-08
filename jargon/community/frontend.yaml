@@ -1,0 +1,195 @@
+# Frontend & Web Dev Community Jargon Pack
+# Covers modern frameworks, UI libraries, and state management
+# Last updated: 2026-02-08
+# Format: canonical_form: [phonetic_variants_the_STT_might_produce]
+
+terms:
+  # --- Frameworks ---
+  Next.js:
+    - next js
+    - next j s
+    - next dot js
+    - nextjs
+  Nuxt:
+    - nuxt
+    - nux
+    - nucks
+    - new xt
+  Svelte:
+    - svelte
+    - svelt
+    - s felt
+  SvelteKit:
+    - svelte kit
+    - svelt kit
+    - s felt kit
+  Astro:
+    - astro
+    - astra
+  Remix:
+    - remix
+    - re mix
+  Vite:
+    - veet
+    - vite
+    - v eat
+    - 维特
+  Bun:
+    - bun
+    - bund
+    - bon
+  Deno:
+    - deno
+    - dee no
+    - den oh
+  Turbopack:
+    - turbo pack
+    - turbopack
+    - turbo peck
+
+  # --- UI Libraries ---
+  Tailwind CSS:
+    - tailwind css
+    - tailwind c s s
+    - tail wind css
+    - tail win css
+  shadcn/ui:
+    - shad cn
+    - shad c n
+    - shadow cn
+    - shad c n ui
+    - shad see en
+  Radix:
+    - radix
+    - ray dix
+    - rad ix
+  Headless UI:
+    - headless ui
+    - headless u i
+    - head less ui
+  Chakra UI:
+    - chakra ui
+    - chakra u i
+    - shock ra ui
+  Material UI:
+    - material ui
+    - material u i
+    - MUI
+    - m u i
+  Framer Motion:
+    - framer motion
+    - frame er motion
+    - framer motions
+  Storybook:
+    - storybook
+    - story book
+
+  # --- State Management ---
+  Zustand:
+    - zoo stand
+    - zu stand
+    - zoo stunt
+    - zustand
+  Jotai:
+    - joe tie
+    - jotai
+    - jo tie
+    - joe tai
+  TanStack Query:
+    - tan stack query
+    - tan stack
+    - tanstack query
+    - tan stack quarry
+  tRPC:
+    - t rpc
+    - t r p c
+    - trpc
+    - tea rpc
+  Redux:
+    - redux
+    - re dux
+    - re ducks
+  Recoil:
+    - recoil
+    - re coil
+
+  # --- Build & Tooling ---
+  TypeScript:
+    - typescript
+    - type script
+    - 泰普斯克里普特
+  ESLint:
+    - es lint
+    - e s lint
+    - eslint
+  Prettier:
+    - prettier
+    - pretty er
+  Webpack:
+    - webpack
+    - web pack
+    - web peck
+  Rollup:
+    - rollup
+    - roll up
+  esbuild:
+    - es build
+    - e s build
+    - esbuild
+  SWC:
+    - s w c
+    - swc
+  Biome:
+    - biome
+    - bi ome
+    - bio me
+  pnpm:
+    - p n p m
+    - pnpm
+    - pee npm
+  Turborepo:
+    - turbo repo
+    - turborepo
+    - turbo repository
+
+  # --- Testing ---
+  Vitest:
+    - vee test
+    - vitest
+    - v test
+    - vie test
+  Playwright:
+    - playwright
+    - play right
+    - play write
+  Cypress:
+    - cypress
+    - cy press
+    - sai press
+
+  # --- APIs & Data ---
+  GraphQL:
+    - graph q l
+    - graphql
+    - graph ql
+    - graph cool
+  Prisma:
+    - prisma
+    - prism a
+    - prizma
+  Drizzle:
+    - drizzle
+    - driz le
+    - drizzal
+  Supabase:
+    - super base
+    - supabase
+    - su pa base
+    - supa base
+  Convex:
+    - convex
+    - con vex
+  Zod:
+    - zod
+    - zawed
+    - z o d

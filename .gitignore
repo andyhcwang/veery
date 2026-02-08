@@ -20,3 +20,8 @@ build/
 .idea/
 .vscode/
 *.swp
+
+# Environment / secrets
+.env
+*.pem
+credentials.json

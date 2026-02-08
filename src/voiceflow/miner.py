@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+import itertools
 import logging
 import re
 from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -13,6 +15,135 @@ import yaml
 from voiceflow.config import PROJECT_ROOT, JargonConfig
 
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────
+# CamelCase splitting
+# ──────────────────────────────────────────────────────────────────
+
+_CAMEL_SPLIT_RE1 = re.compile(r"([a-z0-9])([A-Z])")
+_CAMEL_SPLIT_RE2 = re.compile(r"([A-Z]+)([A-Z][a-z])")
+
+
+def _split_camel_case(name: str) -> list[str]:
+    """Split a CamelCase/mixed-case name into word parts.
+
+    Examples:
+        SvelteKit  -> ["Svelte", "Kit"]
+        DuckDB     -> ["Duck", "DB"]
+        PyTorch    -> ["Py", "Torch"]
+        APIKey     -> ["API", "Key"]
+        vLLM       -> ["v", "LLM"]
+        TWAP       -> ["TWAP"]
+    """
+    s = _CAMEL_SPLIT_RE1.sub(r"\1 \2", name)
+    s = _CAMEL_SPLIT_RE2.sub(r"\1 \2", s)
+    return s.split()
+
+
+# ──────────────────────────────────────────────────────────────────
+# Phonetic substitution table
+# ──────────────────────────────────────────────────────────────────
+
+_PHONETIC_SUBS: dict[str, list[str]] = {
+    "py": ["pie"],
+    "db": ["dee bee"],
+    "js": ["j s"],
+    "ts": ["t s"],
+    "ml": ["m l"],
+    "ai": ["a i"],
+    "sql": ["s q l", "sequel"],
+    "api": ["a p i"],
+    "llm": ["l l m"],
+    "cli": ["c l i"],
+    "gpu": ["g p u"],
+    "cpu": ["c p u"],
+    "npm": ["n p m"],
+    "aws": ["a w s"],
+    "gcp": ["g c p"],
+    "ssh": ["s s h"],
+    "url": ["u r l"],
+    "gui": ["g u i", "gooey"],
+    "ux": ["u x"],
+    "ui": ["u i"],
+    "ci": ["c i"],
+    "cd": ["c d"],
+    "qa": ["q a"],
+    "os": ["o s"],
+    "io": ["i o"],
+    "vm": ["v m"],
+    "k8s": ["k 8 s", "kubernetes"],
+}
+
+
+def _expand_phonetic_variants(parts: list[str]) -> list[str]:
+    """Generate phonetic variants by substituting known fragments.
+
+    Applies _PHONETIC_SUBS to each part (case-insensitive), then builds the
+    cartesian product.  Capped at 8 results to prevent explosion.
+    """
+    options_per_part: list[list[str]] = []
+    for part in parts:
+        key = part.lower()
+        if key in _PHONETIC_SUBS:
+            options_per_part.append([part.lower()] + _PHONETIC_SUBS[key])
+        else:
+            options_per_part.append([part.lower()])
+
+    variants: list[str] = []
+    for combo in itertools.islice(itertools.product(*options_per_part), 8):
+        joined = " ".join(combo)
+        variants.append(joined)
+    return variants
+
+
+# ──────────────────────────────────────────────────────────────────
+# Public variant generation
+# ──────────────────────────────────────────────────────────────────
+
+
+def generate_variants(term: str) -> list[str]:
+    """Generate STT-friendly variants for a jargon term.
+
+    Applies four deterministic rules:
+    1. CamelCase splitting:      SvelteKit -> "svelte kit"
+    2. Lowercase flattening:     SvelteKit -> "sveltekit"
+    3. Acronym letter-spacing:   TWAP -> "t w a p" (ALL_CAPS ≤5 chars only)
+    4. Phonetic substitution:    PyTorch -> "pie torch"
+
+    Returns deduplicated, sorted list excluding the canonical term itself.
+    """
+    canonical_lower = term.lower()
+    variants: set[str] = set()
+
+    parts = _split_camel_case(term)
+
+    # Rule 1: CamelCase split → lowercase words
+    if len(parts) > 1:
+        variants.add(" ".join(p.lower() for p in parts))
+
+    # Rule 2: Lowercase flattening (join all parts without space/underscore)
+    flat = "".join(p.lower() for p in parts)
+    variants.add(flat)
+
+    # Rule 3: Acronym letter-spacing (ALL_CAPS terms ≤5 chars after stripping _)
+    stripped = term.replace("_", "")
+    if stripped.isupper() and len(stripped) <= 5:
+        spaced = " ".join(ch.lower() for ch in stripped)
+        variants.add(spaced)
+
+    # Rule 4: Phonetic substitution on CamelCase parts
+    if len(parts) >= 1:
+        phonetic = _expand_phonetic_variants(parts)
+        for v in phonetic:
+            variants.add(v)
+
+    # Remove the canonical form for single-part terms (e.g. "twap" for "TWAP").
+    # For multi-part CamelCase terms (e.g. "pytorch" for "PyTorch"), keep the
+    # flat lowercase form — it's a valid STT variant distinct from the canonical.
+    if len(parts) == 1:
+        variants.discard(canonical_lower)
+
+    return sorted(variants)
 
 # Directories to always skip
 _SKIP_DIRS = frozenset({
@@ -170,7 +301,73 @@ def mine_terms(
     return results
 
 
-def print_mining_report(results: list[tuple[str, int, bool]]) -> None:
+def write_mined_yaml(
+    results: list[tuple[str, int, bool]],
+    output_path: Path,
+    scan_paths: list[Path],
+) -> int:
+    """Write new mined terms with auto-generated variants to a YAML file.
+
+    If the output file already exists, merges new terms without overwriting
+    existing entries (safe to re-run without losing hand-edits).
+
+    Returns:
+        Count of new terms written.
+    """
+    # Filter to NEW terms only
+    new_terms = [(term, freq) for term, freq, known in results if not known]
+    if not new_terms:
+        return 0
+
+    # Load existing file if present (for merge)
+    existing_terms: dict[str, list[str]] = {}
+    if output_path.exists():
+        with open(output_path) as f:
+            data = yaml.safe_load(f) or {}
+        existing_terms = data.get("terms", {})
+
+    # Build new terms dict, skipping any already in the file
+    added = 0
+    terms_to_write: dict[str, list[str]] = dict(existing_terms)
+    for term, _freq in new_terms:
+        if term in terms_to_write:
+            continue
+        variants = generate_variants(term)
+        terms_to_write[term] = variants
+        added += 1
+
+    if added == 0:
+        return 0
+
+    # Write YAML with header comment
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    paths_str = ", ".join(str(p) for p in scan_paths)
+    header = (
+        f"# Auto-generated by VoiceFlow jargon miner\n"
+        f"# Generated: {datetime.now(tz=UTC).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"# Scanned: {paths_str}\n"
+        f"# Edit freely — re-running --mine will merge without overwriting.\n\n"
+    )
+    yaml_body = yaml.dump(
+        {"terms": terms_to_write},
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    with open(output_path, "w") as f:
+        f.write(header)
+        f.write(yaml_body)
+
+    logger.info("Wrote %d new terms to %s", added, output_path)
+    return added
+
+
+def print_mining_report(
+    results: list[tuple[str, int, bool]],
+    *,
+    written_count: int = 0,
+    output_path: Path | None = None,
+) -> None:
     """Print a formatted report of mining results."""
     if not results:
         print("No potential jargon terms found.")
@@ -185,7 +382,10 @@ def print_mining_report(results: list[tuple[str, int, bool]]) -> None:
         status = "already known" if known else "NEW"
         print(f"  {term:<30} (seen {freq:>3} times) -- {status}")
 
-    if new_count > 0:
+    if written_count > 0 and output_path is not None:
+        print(f"\nWrote {written_count} new terms to {output_path}")
+        print("Terms will be active on next launch (jargon/mined.yaml is loaded by default).")
+    elif new_count > 0:
         print(f"\nTo add terms, append them to jargon/quant_finance.yaml or jargon/tech.yaml")
         print("Format:")
         print("  TermName:")

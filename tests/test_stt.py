@@ -199,7 +199,7 @@ class TestWhisperSTT:
         from voiceflow.stt import WhisperSTT
 
         stt = WhisperSTT()
-        assert stt._config.backend == "sensevoice"
+        assert stt._config.backend == "whisper"
         assert stt._config.whisper_model == "mlx-community/whisper-large-v3-turbo"
 
 
@@ -236,14 +236,14 @@ class TestCreateSTT:
         assert isinstance(stt, WhisperSTT)
         assert stt._loaded
 
-    def test_create_stt_default_is_sensevoice(self) -> None:
-        """Default config creates SenseVoiceSTT."""
-        from voiceflow.stt import SenseVoiceSTT, create_stt
+    def test_create_stt_default_is_whisper(self) -> None:
+        """Default config creates WhisperSTT."""
+        from voiceflow.stt import WhisperSTT, create_stt
 
-        with patch("voiceflow.stt.SenseVoiceSTT._load_model"):
+        with patch("voiceflow.stt.WhisperSTT.load_model"):
             stt = create_stt()
 
-        assert isinstance(stt, SenseVoiceSTT)
+        assert isinstance(stt, WhisperSTT)
 
     def test_create_stt_invalid_backend_returns_sensevoice(self) -> None:
         """Unknown backend falls through to SenseVoiceSTT (current behavior)."""
@@ -264,7 +264,7 @@ class TestSTTConfigDefaults:
     def test_stt_config_defaults(self) -> None:
         """Verify default values for STTConfig fields."""
         cfg = STTConfig()
-        assert cfg.backend == "sensevoice"
+        assert cfg.backend == "whisper"
         assert cfg.whisper_model == "mlx-community/whisper-large-v3-turbo"
         assert cfg.model_name == "iic/SenseVoiceSmall"
         assert cfg.language == "auto"

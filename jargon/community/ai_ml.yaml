@@ -1,0 +1,234 @@
+# AI/ML Community Jargon Pack
+# Covers recent LLM model names, concepts, and AI dev tools
+# Last updated: 2026-02-08
+# Format: canonical_form: [phonetic_variants_the_STT_might_produce]
+
+terms:
+  # --- Model names ---
+  DeepSeek:
+    - deep seek
+    - deep seak
+    - deep sick
+    - 深度求索
+  Llama:
+    - llama
+    - lama
+    - la ma
+  Mistral:
+    - mistral
+    - mistrol
+    - miss trawl
+  Gemini:
+    - gemini
+    - gem in eye
+    - gem in knee
+    - 双子座
+  Claude:
+    - clod
+    - clawed
+    - cloud
+    - 克劳德
+  Qwen:
+    - q win
+    - que wen
+    - kwen
+    - 千问
+    - 通义千问
+  Phi:
+    - fi
+    - fie
+    - fai
+  Mixtral:
+    - mix trawl
+    - mixed role
+    - mixtral
+  GPT:
+    - g p t
+    - gpt
+    - GPT
+  ChatGPT:
+    - chat g p t
+    - chat gpt
+    - 聊天GPT
+  DALL-E:
+    - dolly
+    - doll e
+    - dall e
+    - dall-e
+  Stable Diffusion:
+    - stable diffusion
+    - stable defusion
+  Midjourney:
+    - mid journey
+    - midjourney
+  Anthropic:
+    - anthropic
+    - anthro pick
+    - an thropic
+  OpenAI:
+    - open ai
+    - open a i
+    - open eye
+
+  # --- Concepts ---
+  RAG:
+    - rag
+    - r a g
+    - 检索增强生成
+  MCP:
+    - m c p
+    - mcp
+    - model context protocol
+  LoRA:
+    - lora
+    - laura
+    - lo ra
+    - low rank
+  QLoRA:
+    - q lora
+    - q laura
+    - que lora
+    - kyu lora
+  fine-tuning:
+    - fine tuning
+    - finetuning
+    - fine tune
+    - 微调
+  RLHF:
+    - r l h f
+    - rlhf
+    - reinforcement learning from human feedback
+  DPO:
+    - d p o
+    - dpo
+    - direct preference optimization
+  agentic:
+    - a gent ick
+    - agentive
+    - agent tick
+    - 智能体
+  multimodal:
+    - multi modal
+    - multi model
+    - multi module
+    - 多模态
+  chain-of-thought:
+    - chain of thought
+    - chain of thoughts
+    - 思维链
+  prompt engineering:
+    - prompt engineering
+    - prompt engineer
+    - 提示工程
+  transformer:
+    - transformer
+    - trans former
+  attention mechanism:
+    - attention mechanism
+    - attention mechanisms
+    - 注意力机制
+  embeddings:
+    - embeddings
+    - embedding
+    - in beddings
+    - 嵌入
+  vector database:
+    - vector database
+    - vector DB
+    - vector data base
+    - 向量数据库
+  tokenizer:
+    - tokenizer
+    - token izer
+    - token eyes er
+    - 分词器
+  inference:
+    - inference
+    - inferencing
+    - 推理
+  quantization:
+    - quantization
+    - quantize
+    - 量化
+  GGUF:
+    - g g u f
+    - gguf
+  GPTQ:
+    - g p t q
+    - gptq
+  hallucination:
+    - hallucination
+    - hallucinations
+    - 幻觉
+  grounding:
+    - grounding
+    - ground truth
+  context window:
+    - context window
+    - context windows
+    - 上下文窗口
+  system prompt:
+    - system prompt
+    - system prompts
+    - 系统提示
+
+  # --- Tools & Frameworks ---
+  LangChain:
+    - lang chain
+    - language chain
+    - langchain
+  LlamaIndex:
+    - llama index
+    - lama index
+    - llama in dex
+  Cursor:
+    - cursor
+    - cursur
+    - 光标
+  Copilot:
+    - co pilot
+    - copilot
+    - copy lot
+  v0:
+    - v zero
+    - v 0
+    - vee zero
+  Bolt:
+    - bolt
+    - bolts
+  Windsurf:
+    - windsurf
+    - wind surf
+    - wind serf
+  Vercel AI SDK:
+    - vercel ai sdk
+    - vercel a i s d k
+    - verce l ai
+  Hugging Face:
+    - hugging face
+    - hugging phase
+    - 抱抱脸
+  Ollama:
+    - ollama
+    - oh llama
+    - o lama
+  vLLM:
+    - v l l m
+    - vllm
+    - vee llm
+  MLflow:
+    - ml flow
+    - m l flow
+    - mlflow
+  Weights & Biases:
+    - weights and biases
+    - w and b
+    - wandb
+  CrewAI:
+    - crew ai
+    - crew a i
+    - crew eye
+  AutoGen:
+    - auto gen
+    - autogen
+    - auto gene

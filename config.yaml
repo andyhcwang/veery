@@ -18,6 +18,10 @@
 #   dict_paths:
 #     - "jargon/quant_finance.yaml"
 #     - "jargon/tech.yaml"
+#     # Community jargon packs — uncomment the ones relevant to your work:
+#     - "jargon/community/ai_ml.yaml"        # AI/ML model names, concepts, tools
+#     - "jargon/community/devops_cloud.yaml"  # Kubernetes, AWS, CI/CD, observability
+#     - "jargon/community/frontend.yaml"      # Next.js, Tailwind, React ecosystem
 #   fuzzy_threshold: 85
 
 # hotkey:

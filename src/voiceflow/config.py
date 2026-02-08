@@ -39,19 +39,19 @@ class STTConfig:
     model_name: str = "iic/SenseVoiceSmall"
     language: str = "auto"  # Auto-detect for code-switching
     device: str = "cpu"  # CPU is more reliable than MPS on macOS
-    backend: str = "sensevoice"  # "sensevoice" or "whisper"
+    backend: str = "whisper"  # "sensevoice" or "whisper"
     whisper_model: str = "mlx-community/whisper-large-v3-turbo"
 
 
 STT_BACKENDS: tuple[tuple[str, str], ...] = (
     ("sensevoice", "SenseVoice-Small (Chinese-optimized)"),
-    ("whisper", "Whisper Large-v3-turbo (accent-robust)"),
+    ("whisper", "Whisper Large-v3-turbo (multilingual-robust)"),
 )
 
 
 @dataclass(frozen=True)
 class JargonConfig:
-    dict_paths: tuple[str, ...] = ("jargon/quant_finance.yaml", "jargon/tech.yaml")
+    dict_paths: tuple[str, ...] = ("jargon/quant_finance.yaml", "jargon/tech.yaml", "jargon/mined.yaml")
     learned_path: str | None = "jargon/learned.yaml"  # Tier 2: auto-learned terms
     fuzzy_threshold: int = 82  # rapidfuzz score_cutoff (0-100, tuned down from 85 for accented STT)
     max_phrase_words: int = 3  # Try 3-word, 2-word, 1-word phrases

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 from voiceflow.config import JargonConfig
-from voiceflow.miner import _is_interesting_name, _extract_names_from_ast, _scan_directory, mine_terms
+from voiceflow.miner import (
+    _extract_names_from_ast,
+    _is_interesting_name,
+    _scan_directory,
+    _split_camel_case,
+    generate_variants,
+    mine_terms,
+    write_mined_yaml,
+)
 
 
 class TestExtractAllCaps:
@@ -186,3 +193,193 @@ class TestIsInterestingName:
     def test_all_caps_with_digits(self) -> None:
         assert _is_interesting_name("K8S") is True
         assert _is_interesting_name("S3_BUCKET") is True
+
+
+class TestSplitCamelCase:
+    """Unit tests for _split_camel_case()."""
+
+    def test_standard_camel(self) -> None:
+        assert _split_camel_case("SvelteKit") == ["Svelte", "Kit"]
+
+    def test_trailing_acronym(self) -> None:
+        assert _split_camel_case("DuckDB") == ["Duck", "DB"]
+
+    def test_leading_acronym(self) -> None:
+        assert _split_camel_case("APIKey") == ["API", "Key"]
+
+    def test_lowercase_prefix(self) -> None:
+        assert _split_camel_case("vLLM") == ["v", "LLM"]
+
+    def test_all_caps(self) -> None:
+        assert _split_camel_case("TWAP") == ["TWAP"]
+
+    def test_two_word(self) -> None:
+        assert _split_camel_case("PyTorch") == ["Py", "Torch"]
+
+    def test_three_word(self) -> None:
+        assert _split_camel_case("MyClassName") == ["My", "Class", "Name"]
+
+    def test_mixed_acronym_and_words(self) -> None:
+        assert _split_camel_case("FastAPI") == ["Fast", "API"]
+
+    def test_digits_in_name(self) -> None:
+        assert _split_camel_case("Vue3Router") == ["Vue3", "Router"]
+
+    def test_single_word(self) -> None:
+        assert _split_camel_case("Router") == ["Router"]
+
+
+class TestGenerateVariants:
+    """Unit tests for generate_variants()."""
+
+    def test_camel_case_split(self) -> None:
+        variants = generate_variants("SvelteKit")
+        assert "svelte kit" in variants
+
+    def test_lowercase_flattening(self) -> None:
+        variants = generate_variants("SvelteKit")
+        assert "sveltekit" in variants
+
+    def test_acronym_letter_spacing(self) -> None:
+        variants = generate_variants("TWAP")
+        assert "t w a p" in variants
+
+    def test_no_letter_spacing_for_long_all_caps(self) -> None:
+        # ALL_CAPS >5 chars should not get letter-spaced
+        variants = generate_variants("BUFFER")
+        assert "b u f f e r" not in variants
+
+    def test_phonetic_substitution(self) -> None:
+        variants = generate_variants("PyTorch")
+        assert "pie torch" in variants
+
+    def test_no_self_variant_for_single_part(self) -> None:
+        # Single-part terms should not include themselves lowered as a variant
+        for term in ["TWAP", "Router"]:
+            variants = generate_variants(term)
+            assert term.lower() not in variants
+
+    def test_flat_form_kept_for_multi_part(self) -> None:
+        # Multi-part CamelCase terms DO include the flat form as a variant
+        assert "pytorch" in generate_variants("PyTorch")
+        assert "sveltekit" in generate_variants("SvelteKit")
+
+    def test_sorted_output(self) -> None:
+        variants = generate_variants("DuckDB")
+        assert variants == sorted(variants)
+
+    def test_dedup(self) -> None:
+        variants = generate_variants("SvelteKit")
+        assert len(variants) == len(set(variants))
+
+    def test_pytorch_variants(self) -> None:
+        variants = generate_variants("PyTorch")
+        assert "pie torch" in variants
+        assert "py torch" in variants
+        assert "pytorch" in variants
+
+    def test_fastapi_variants(self) -> None:
+        variants = generate_variants("FastAPI")
+        assert "fast a p i" in variants
+        assert "fast api" in variants
+        assert "fastapi" in variants
+
+
+class TestWriteMinedYaml:
+    """Tests for write_mined_yaml()."""
+
+    def test_writes_new_terms(self, tmp_path: Path) -> None:
+        """New terms are written to a YAML file with variants."""
+        output = tmp_path / "mined.yaml"
+        results = [("PyTorch", 5, False), ("TWAP", 3, False)]
+        count = write_mined_yaml(results, output, [tmp_path])
+
+        assert count == 2
+        assert output.exists()
+        with open(output) as f:
+            content = f.read()
+        data = yaml.safe_load(content)
+        assert "PyTorch" in data["terms"]
+        assert "TWAP" in data["terms"]
+        assert isinstance(data["terms"]["PyTorch"], list)
+
+    def test_skips_known_terms(self, tmp_path: Path) -> None:
+        """Already-known terms are not written."""
+        output = tmp_path / "mined.yaml"
+        results = [("PyTorch", 5, True), ("TWAP", 3, False)]
+        count = write_mined_yaml(results, output, [tmp_path])
+
+        assert count == 1
+        data = yaml.safe_load(output.read_text())
+        assert "PyTorch" not in data["terms"]
+        assert "TWAP" in data["terms"]
+
+    def test_returns_zero_for_all_known(self, tmp_path: Path) -> None:
+        """If all terms are known, returns 0 and doesn't create file."""
+        output = tmp_path / "mined.yaml"
+        results = [("PyTorch", 5, True), ("TWAP", 3, True)]
+        count = write_mined_yaml(results, output, [tmp_path])
+
+        assert count == 0
+        assert not output.exists()
+
+    def test_merges_with_existing(self, tmp_path: Path) -> None:
+        """Re-running merges without overwriting existing terms."""
+        output = tmp_path / "mined.yaml"
+        # First run: write PyTorch
+        results1 = [("PyTorch", 5, False)]
+        write_mined_yaml(results1, output, [tmp_path])
+
+        # Edit PyTorch variants by hand
+        data = yaml.safe_load(output.read_text())
+        data["terms"]["PyTorch"] = ["my custom variant"]
+        with open(output, "w") as f:
+            yaml.dump(data, f)
+
+        # Second run: add TWAP, should NOT overwrite PyTorch
+        results2 = [("PyTorch", 5, False), ("TWAP", 3, False)]
+        count = write_mined_yaml(results2, output, [tmp_path])
+
+        assert count == 1  # only TWAP is new
+        data = yaml.safe_load(output.read_text())
+        assert data["terms"]["PyTorch"] == ["my custom variant"]
+        assert "TWAP" in data["terms"]
+
+    def test_creates_parent_dirs(self, tmp_path: Path) -> None:
+        """Parent directories are created if they don't exist."""
+        output = tmp_path / "deep" / "nested" / "mined.yaml"
+        results = [("TWAP", 3, False)]
+        count = write_mined_yaml(results, output, [tmp_path])
+
+        assert count == 1
+        assert output.exists()
+
+    def test_header_comment(self, tmp_path: Path) -> None:
+        """Output file includes a header comment."""
+        output = tmp_path / "mined.yaml"
+        results = [("TWAP", 3, False)]
+        write_mined_yaml(results, output, [tmp_path])
+
+        content = output.read_text()
+        assert content.startswith("# Auto-generated by VoiceFlow")
+        assert "Edit freely" in content
+
+    def test_loadable_yaml(self, tmp_path: Path) -> None:
+        """Generated file is valid YAML loadable by JargonDictionary."""
+        output = tmp_path / "mined.yaml"
+        results = [("PyTorch", 5, False), ("DuckDB", 3, False), ("TWAP", 2, False)]
+        write_mined_yaml(results, output, [tmp_path])
+
+        # Verify it can be loaded as a jargon dictionary
+        from voiceflow.jargon import JargonCorrector
+        config = JargonConfig(dict_paths=(str(output),), learned_path=None)
+        corrector = JargonCorrector(config)
+        assert corrector is not None
+
+    def test_empty_results(self, tmp_path: Path) -> None:
+        """Empty results returns 0 and doesn't create file."""
+        output = tmp_path / "mined.yaml"
+        count = write_mined_yaml([], output, [tmp_path])
+
+        assert count == 0
+        assert not output.exists()

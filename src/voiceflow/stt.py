@@ -167,7 +167,7 @@ def _strip_tags(text: str) -> str:
 
 
 class WhisperSTT:
-    """Wrapper around mlx-whisper for accent-robust multilingual STT on Apple Silicon."""
+    """Wrapper around mlx-whisper for multilingual-robust STT on Apple Silicon."""
 
     def __init__(self, config: STTConfig | None = None) -> None:
         self._config = config or STTConfig()

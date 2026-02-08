@@ -186,11 +186,11 @@ class TestConfigLoadsDefaults:
         assert config.stt.model_name == "iic/SenseVoiceSmall"
         assert config.stt.language == "auto"
         assert config.stt.device == "cpu"
-        assert config.stt.backend == "sensevoice"
+        assert config.stt.backend == "whisper"
         assert config.stt.whisper_model == "mlx-community/whisper-large-v3-turbo"
 
         assert isinstance(config.jargon, JargonConfig)
-        assert len(config.jargon.dict_paths) == 2
+        assert len(config.jargon.dict_paths) == 3
 
         assert isinstance(config.output, OutputConfig)
         assert config.output.cgevent_char_limit == 500
