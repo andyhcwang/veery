@@ -28,6 +28,7 @@ _NSScreen = None
 _NSView = None
 _NSBezierPath = None
 _NSTimer = None
+_NSVisualEffectView = None
 _NSAnimationContext = None
 _loaded = False
 
@@ -58,7 +59,7 @@ _overlay_ref = None  # type: OverlayIndicator | None
 def _ensure_appkit() -> bool:
     """Lazy-load AppKit classes. Returns True if available."""
     global _NSPanel, _NSColor, _NSTextField, _NSFont, _NSScreen, _NSView
-    global _NSBezierPath, _NSTimer, _NSAnimationContext, _loaded
+    global _NSBezierPath, _NSTimer, _NSVisualEffectView, _NSAnimationContext, _loaded
     if _loaded:
         return True
     try:
@@ -72,6 +73,7 @@ def _ensure_appkit() -> bool:
         _NSView = AppKit.NSView
         _NSBezierPath = AppKit.NSBezierPath
         _NSTimer = AppKit.NSTimer
+        _NSVisualEffectView = AppKit.NSVisualEffectView
         _NSAnimationContext = AppKit.NSAnimationContext
         _loaded = True
         return True
@@ -116,21 +118,25 @@ class _PillView:
                     self._bg_red = _BG_RED
                     self._bg_green = _BG_GREEN
                     self._bg_blue = _BG_BLUE
+                    self._has_blur = False
                 return self
 
             def drawRect_(self, rect):
-                _NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    self._bg_red, self._bg_green, self._bg_blue, _BG_ALPHA
-                ).set()
-                path = _NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    rect, _PILL_RADIUS, _PILL_RADIUS
-                )
-                path.fill()
+                if not self._has_blur:
+                    _NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                        self._bg_red, self._bg_green, self._bg_blue, _BG_ALPHA
+                    ).set()
+                    path = _NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                        rect, _PILL_RADIUS, _PILL_RADIUS
+                    )
+                    path.fill()
 
                 if self._mode == "recording":
                     self._draw_recording_dot(rect)
                 elif self._mode == "processing":
                     self._draw_processing_dots(rect)
+                elif self._mode == "success":
+                    self._draw_success_dot(rect)
 
             def _draw_recording_dot(self, rect):
                 """Draw a pulsing red dot on the left side."""
@@ -166,6 +172,20 @@ class _PillView:
                         1.0, 1.0, 1.0, alpha
                     ).set()
                     _NSBezierPath.bezierPathWithOvalInRect_(dot_rect).fill()
+
+            def _draw_success_dot(self, rect):
+                """Draw a green dot on the left side for success state."""
+                dot_size = 8
+                dot_x = 18
+                dot_y = (rect.size.height - dot_size) / 2
+                dot_rect = ((dot_x, dot_y), (dot_size, dot_size))
+                _NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                    _SUCCESS_GREEN_RED,
+                    _SUCCESS_GREEN_GREEN,
+                    _SUCCESS_GREEN_BLUE,
+                    1.0,
+                ).set()
+                _NSBezierPath.bezierPathWithOvalInRect_(dot_rect).fill()
 
             # --- NSTimer callbacks (ObjC selectors) ---
 
@@ -250,18 +270,44 @@ class OverlayIndicator:
             panel.setCollectionBehavior_(1 << 0)  # canJoinAllSpaces
             panel.setAlphaValue_(0.0)
 
-            # Pill background view
+            # Native blur background (NSVisualEffectView)
+            has_blur = False
+            if _NSVisualEffectView is not None:
+                try:
+                    blur_view = _NSVisualEffectView.alloc().initWithFrame_(
+                        ((0, 0), (_PILL_WIDTH, _PILL_HEIGHT))
+                    )
+                    blur_view.setBlendingMode_(1)  # behindWindow
+                    blur_view.setState_(1)  # active
+                    blur_view.setMaterial_(13)  # hudWindow
+                    blur_view.setWantsLayer_(True)
+                    blur_view.layer().setCornerRadius_(_PILL_RADIUS)
+                    blur_view.layer().setMasksToBounds_(True)
+                    dark = AppKit.NSAppearance.appearanceNamed_(
+                        "NSAppearanceNameVibrantDark"
+                    )
+                    if dark is not None:
+                        blur_view.setAppearance_(dark)
+                    panel.contentView().addSubview_(blur_view)
+                    has_blur = True
+                except Exception:
+                    logger.debug("NSVisualEffectView unavailable, using solid background")
+
+            # Pill overlay view (draws animated dots on transparent background)
             PillView = _PillView.get_class()
             pill_view = PillView.alloc().initWithFrame_(
                 ((0, 0), (_PILL_WIDTH, _PILL_HEIGHT))
             )
+            pill_view._has_blur = has_blur
             panel.contentView().addSubview_(pill_view)
 
-            # Text label — offset right for dot/dots area
-            label_x = 40
-            label_width = _PILL_WIDTH - label_x - 10
+            # Text label — vertically centered, offset right for dot area
+            label_x = 34
+            label_width = _PILL_WIDTH - label_x - 14
+            label_height = 20
+            label_y = (_PILL_HEIGHT - label_height) / 2
             label = _NSTextField.alloc().initWithFrame_(
-                ((label_x, 0), (label_width, _PILL_HEIGHT))
+                ((label_x, label_y), (label_width, label_height))
             )
             label.setStringValue_("")
             label.setBezeled_(False)
@@ -270,7 +316,7 @@ class OverlayIndicator:
             label.setSelectable_(False)
             label.setAlignment_(0)  # NSTextAlignmentLeft
             label.setTextColor_(_NSColor.whiteColor())
-            label.setFont_(_NSFont.systemFontOfSize_weight_(14, 0.23))  # Medium
+            label.setFont_(_NSFont.systemFontOfSize_weight_(13, 0.3))  # Semibold
             panel.contentView().addSubview_(label)
 
             self._panel = panel
@@ -330,7 +376,8 @@ class OverlayIndicator:
                 self._pill_view._bg_red = _BG_RED
                 self._pill_view._bg_green = _BG_GREEN
                 self._pill_view._bg_blue = _BG_BLUE
-                self._label.setStringValue_("Recording")
+                self._label.setTextColor_(_NSColor.whiteColor())
+                self._label.setStringValue_("Listening")
                 self._pill_view.setNeedsDisplay_(True)
                 self._panel.orderFrontRegardless()
                 self._fade_in()
@@ -355,6 +402,7 @@ class OverlayIndicator:
                 self._pill_view._bg_red = _BG_RED
                 self._pill_view._bg_green = _BG_GREEN
                 self._pill_view._bg_blue = _BG_BLUE
+                self._label.setTextColor_(_NSColor.whiteColor())
                 self._label.setStringValue_("Processing")
                 self._pill_view.setNeedsDisplay_(True)
                 self._panel.orderFrontRegardless()
@@ -375,10 +423,16 @@ class OverlayIndicator:
                 if not self._ensure_panel():
                     return
                 self._stop_timers()
-                self._pill_view._mode = None
-                self._pill_view._bg_red = _SUCCESS_GREEN_RED * 0.5 + _BG_RED * 0.5
-                self._pill_view._bg_green = _SUCCESS_GREEN_GREEN * 0.5 + _BG_GREEN * 0.5
-                self._pill_view._bg_blue = _SUCCESS_GREEN_BLUE * 0.5 + _BG_BLUE * 0.5
+                self._pill_view._mode = "success"
+                self._pill_view._bg_red = _BG_RED
+                self._pill_view._bg_green = _BG_GREEN
+                self._pill_view._bg_blue = _BG_BLUE
+                self._label.setTextColor_(
+                    _NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                        _SUCCESS_GREEN_RED, _SUCCESS_GREEN_GREEN,
+                        _SUCCESS_GREEN_BLUE, 1.0,
+                    )
+                )
                 self._label.setStringValue_("Done")
                 self._pill_view.setNeedsDisplay_(True)
                 self._panel.orderFrontRegardless()

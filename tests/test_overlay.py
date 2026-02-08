@@ -36,6 +36,7 @@ def mock_appkit():
     mod._NSView = MagicMock()
     mod._NSBezierPath = MagicMock()
     mod._NSTimer = MagicMock()
+    mod._NSVisualEffectView = MagicMock()
     mod._NSAnimationContext = MagicMock()
 
     return mod
@@ -135,7 +136,7 @@ class TestOverlayIndicator:
         overlay._run_on_main = run_sync
         overlay.show_recording()
 
-        overlay._label.setStringValue_.assert_called_with("Recording")
+        overlay._label.setStringValue_.assert_called_with("Listening")
         overlay._pill_view.setNeedsDisplay_.assert_called_with(True)
         overlay._panel.orderFrontRegardless.assert_called()
         assert overlay._pill_view._mode == "recording"
@@ -166,7 +167,7 @@ class TestOverlayIndicator:
         overlay._label.setStringValue_.assert_called_with("Done")
         overlay._pill_view.setNeedsDisplay_.assert_called_with(True)
         overlay._panel.orderFrontRegardless.assert_called()
-        assert overlay._pill_view._mode is None  # success has no dot mode
+        assert overlay._pill_view._mode == "success"
 
     def test_hide_calls_fade_out(self, mock_appkit, overlay_with_panel):
         """When _run_on_main executes synchronously, hide fades out."""
