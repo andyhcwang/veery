@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import enum
 import functools
 import logging
 import subprocess
 import threading
 import time
+import webbrowser
 
 import rumps
 
@@ -20,8 +19,19 @@ from voiceflow.corrector import TextCorrector
 from voiceflow.jargon import JargonCorrector
 from voiceflow.learner import CorrectionLearner
 from voiceflow.output import paste_to_active_app
-from voiceflow.overlay import OverlayIndicator
-from voiceflow.stt import SenseVoiceSTT, WhisperSTT, create_stt
+from voiceflow.overlay import (
+    DownloadProgressOverlay,
+    OverlayIndicator,
+    PermissionGuideOverlay,
+    check_permissions_granted,
+)
+from voiceflow.stt import (
+    SenseVoiceSTT,
+    WhisperSTT,
+    _is_model_cached,
+    create_stt,
+    ensure_model_downloaded,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +40,6 @@ class State(enum.Enum):
     IDLE = "idle"
     RECORDING = "recording"
     PROCESSING = "processing"
-
-
-def check_accessibility_permission() -> bool:
-    """Check if Accessibility permission is granted (needed for hotkey + text output)."""
-    lib_path = ctypes.util.find_library("ApplicationServices")
-    if lib_path is None:
-        logger.warning("Could not find ApplicationServices library")
-        return False
-    lib = ctypes.cdll.LoadLibrary(lib_path)
-    return bool(lib.AXIsProcessTrusted())
 
 
 class VoiceFlowApp(rumps.App):
@@ -100,6 +100,8 @@ class VoiceFlowApp(rumps.App):
             None,  # separator
             self._edit_jargon_menu,
             None,  # separator
+            rumps.MenuItem("About VoiceFlow", callback=self._on_about),
+            None,  # separator
             rumps.MenuItem("Quit VoiceFlow", callback=self._on_quit),
         ]
 
@@ -125,10 +127,9 @@ class VoiceFlowApp(rumps.App):
         # Signals that all models are loaded and app is ready
         self._ready = threading.Event()
 
-        self._initialize_components()
+        self._permission_overlay = PermissionGuideOverlay()
 
-        # Heavy model loading happens in background after the event loop starts
-        threading.Thread(target=self._load_models, daemon=True).start()
+        self._initialize_components()
 
     def _initialize_components(self) -> None:
         """Lightweight init — create objects without loading heavy models."""
@@ -160,18 +161,30 @@ class VoiceFlowApp(rumps.App):
         # 4. Global hotkey listener
         self._start_hotkey_listener()
 
-        # 5. Check accessibility permission
-        if not check_accessibility_permission():
-            logger.warning("Accessibility permission not granted. Opening System Settings...")
-            subprocess.run(
-                ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
-                check=False,
-            )
+        # 5. Permission check — show guide overlay or proceed to model loading
+        if check_permissions_granted():
+            logger.info("All permissions granted, loading models...")
+            threading.Thread(target=self._load_models, daemon=True).start()
+        else:
+            logger.info("Missing permissions, showing permission guide...")
+            self._detail_item.title = "Waiting for permissions..."
+            self._permission_overlay.show(on_complete=self._on_permissions_granted)
 
-        logger.info("VoiceFlow initialized (loading models in background...)")
+        logger.info("VoiceFlow initialized")
+
+    def _on_permissions_granted(self) -> None:
+        """Called when all permissions are granted (from PermissionGuideOverlay)."""
+        logger.info("Permissions granted, starting model loading...")
+        self._detail_item.title = "Loading models..."
+        threading.Thread(target=self._load_models, daemon=True).start()
 
     def _load_models(self) -> None:
-        """Background thread: download/load heavy models with menubar status."""
+        """Background thread: download/load heavy models with menubar status.
+
+        Shows a DownloadProgressOverlay when models need to be downloaded for the
+        first time. If models are already cached, skips the overlay entirely.
+        """
+        download_overlay: DownloadProgressOverlay | None = None
         try:
             # VAD model (small, ~50MB — load first so recording is instant)
             self.title = "\u2b07"  # down arrow
@@ -180,10 +193,34 @@ class VoiceFlowApp(rumps.App):
                 self._recorder._ensure_vad_loaded()
                 logger.info("VAD model pre-loaded")
 
+            # Check if STT model needs downloading
+            stt_cfg = self._config.stt
+            repo_id = stt_cfg.model_name if stt_cfg.backend != "whisper" else stt_cfg.whisper_model
+            needs_download = not _is_model_cached(repo_id)
+
+            if needs_download:
+                download_overlay = DownloadProgressOverlay()
+                download_overlay.show()
+                self._detail_item.title = "Downloading model..."
+
+                def _progress(fraction: float, detail: str) -> None:
+                    if download_overlay is not None:
+                        download_overlay.set_progress(fraction, detail)
+
+                ensure_model_downloaded(repo_id, progress_callback=_progress)
+
+                # Update overlay to show warmup phase
+                download_overlay.set_progress(1.0, "Loading model into memory...")
+            else:
+                self._detail_item.title = "Loading STT model..."
+
             # STT model
-            self._detail_item.title = "Loading STT model..."
-            self._stt = create_stt(self._config.stt)
-            logger.info("STT loaded (backend=%s)", self._config.stt.backend)
+            self._stt = create_stt(stt_cfg)
+            logger.info("STT loaded (backend=%s)", stt_cfg.backend)
+
+            # Hide download overlay if it was shown
+            if download_overlay is not None:
+                download_overlay.hide()
 
             # Ready for recording
             self.title = "\U0001f3a4"
@@ -192,6 +229,8 @@ class VoiceFlowApp(rumps.App):
             logger.info("STT ready — accepting dictation")
         except Exception:
             logger.exception("Failed to load models")
+            if download_overlay is not None:
+                download_overlay.hide()
             self.title = "\u26a0"  # warning
             self._detail_item.title = "Model load failed"
             self._ready.set()  # unblock anyway
@@ -221,8 +260,14 @@ class VoiceFlowApp(rumps.App):
     # State management
     # ------------------------------------------------------------------
 
-    def _set_state(self, new_state: State) -> None:
-        """Update application state and UI (thread-safe)."""
+    def _set_state(self, new_state: State, *, skip_overlay: bool = False) -> None:
+        """Update application state and UI (thread-safe).
+
+        Args:
+            new_state: The target state.
+            skip_overlay: If True, don't update the overlay (used when
+                show_success() was already called and will auto-hide).
+        """
         with self._state_lock:
             old_state = self._state
             self._state = new_state
@@ -232,7 +277,8 @@ class VoiceFlowApp(rumps.App):
         if new_state == State.IDLE:
             self.title = "\U0001f3a4"
             self._detail_item.title = "Ready"
-            self._overlay.hide()
+            if not skip_overlay:
+                self._overlay.hide()
         elif new_state == State.RECORDING:
             self.title = "\U0001f534"  # red circle
             self._detail_item.title = "Recording..."
@@ -350,6 +396,7 @@ class VoiceFlowApp(rumps.App):
     def _process_segment(self, segment) -> None:
         """Process a captured audio segment: STT -> correct -> paste."""
         self._set_state(State.PROCESSING)
+        success = False
         try:
             if self._stt is None:
                 rumps.notification("VoiceFlow", "Error", "STT model not available")
@@ -368,6 +415,7 @@ class VoiceFlowApp(rumps.App):
                 self._last_pasted_text = raw_text
                 self._last_pasted_time = time.monotonic()
                 self._session_count += 1
+                success = True
                 return
 
             result = self._corrector.correct(raw_text)
@@ -380,12 +428,16 @@ class VoiceFlowApp(rumps.App):
             self._last_pasted_text = result.final
             self._last_pasted_time = time.monotonic()
             self._session_count += 1
+            success = True
 
         except Exception as e:
             logger.exception("Processing failed")
             rumps.notification("VoiceFlow", "Error", str(e))
         finally:
-            self._set_state(State.IDLE)
+            if success:
+                # Show success flash — it auto-hides after 800ms
+                self._overlay.show_success()
+            self._set_state(State.IDLE, skip_overlay=success)
             if self._session_count > 0:
                 n = self._session_count
                 self._detail_item.title = f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session"
@@ -490,6 +542,22 @@ class VoiceFlowApp(rumps.App):
             subprocess.run(["open", str(path)], check=False)
         else:
             rumps.notification("VoiceFlow", "", f"Jargon file not found: {path}")
+
+    def _on_about(self, _sender) -> None:
+        """Show About dialog."""
+        response = rumps.alert(
+            title=f"VoiceFlow v{__version__}",
+            message=(
+                "macOS bilingual dictation for EN/ZH professionals.\n\n"
+                "Author: Cedric Wang\n"
+                "GitHub: github.com/shahdpinky/voiceflow\n"
+                "Email: haocheng.c.wang@gmail.com"
+            ),
+            ok="Close",
+            other="Open GitHub",
+        )
+        if response == 0:  # "Other" button
+            webbrowser.open("https://github.com/shahdpinky/voiceflow")
 
     def _on_quit(self, _sender) -> None:
         """Clean shutdown."""

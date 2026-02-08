@@ -1,10 +1,11 @@
-"""Speech-to-text backends: SenseVoice-Small (FunASR) and Whisper (lightning-whisper-mlx)."""
+"""Speech-to-text backends: SenseVoice-Small (FunASR) and Whisper (mlx-whisper)."""
 
 from __future__ import annotations
 
 import logging
 import re
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,79 @@ logger = logging.getLogger(__name__)
 # Regex to strip SenseVoice special tokens: language, emotion, and event tags.
 # Examples: <|zh|>, <|en|>, <|HAPPY|>, <|BGM|>, <|Speech|>, <|Applause|>
 _TAG_PATTERN = re.compile(r"<\|[^|]*\|>")
+
+
+def _is_model_cached(repo_id: str) -> bool:
+    """Check if a HuggingFace model is already fully cached locally."""
+    try:
+        from huggingface_hub import scan_cache_dir
+
+        cache_info = scan_cache_dir()
+        for repo in cache_info.repos:
+            if repo.repo_id == repo_id and repo.size_on_disk > 0:
+                return True
+    except Exception:
+        logger.debug("Could not scan HF cache for %s", repo_id)
+    return False
+
+
+def ensure_model_downloaded(
+    repo_id: str,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> None:
+    """Pre-download a HuggingFace model with progress tracking.
+
+    If the model is already cached, this returns immediately. Otherwise it
+    downloads via ``huggingface_hub.snapshot_download()`` and reports progress
+    through the callback.
+
+    Args:
+        repo_id: HuggingFace model repo (e.g., "iic/SenseVoiceSmall").
+        progress_callback: Called with (fraction 0.0-1.0, detail_string).
+    """
+    if _is_model_cached(repo_id):
+        logger.info("Model %s already cached, skipping download", repo_id)
+        return
+
+    logger.info("Downloading model %s ...", repo_id)
+
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import tqdm as hf_tqdm
+
+    if progress_callback is not None:
+        progress_callback(0.0, f"Downloading {repo_id}...")
+
+    # Monkey-patch tqdm to capture download progress
+    _original_tqdm = hf_tqdm.tqdm
+
+    class _ProgressTqdm(_original_tqdm):
+        """Wraps HF's tqdm to forward progress to our callback."""
+
+        def update(self, n=1):
+            super().update(n)
+            if self.total and self.total > 0 and progress_callback is not None:
+                fraction = self.n / self.total
+                # Format bytes nicely
+                downloaded_mb = self.n / (1024 * 1024)
+                total_mb = self.total / (1024 * 1024)
+                if total_mb >= 1024:
+                    name = repo_id.split("/")[-1]
+                    dl_gb = downloaded_mb / 1024
+                    tot_gb = total_mb / 1024
+                    detail = f"Downloading {name} ({dl_gb:.1f} / {tot_gb:.1f} GB)..."
+                else:
+                    detail = f"Downloading {repo_id.split('/')[-1]} ({downloaded_mb:.0f} / {total_mb:.0f} MB)..."
+                progress_callback(fraction, detail)
+
+    hf_tqdm.tqdm = _ProgressTqdm
+    try:
+        snapshot_download(repo_id)
+    finally:
+        hf_tqdm.tqdm = _original_tqdm
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Download complete")
+    logger.info("Model %s downloaded", repo_id)
 
 
 class SenseVoiceSTT:
