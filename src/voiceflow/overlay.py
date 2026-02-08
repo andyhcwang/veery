@@ -48,9 +48,9 @@ _RECORDING_DOT_RED = 1.0
 _RECORDING_DOT_GREEN = 0.231
 _RECORDING_DOT_BLUE = 0.188
 
-_SUCCESS_GREEN_RED = 0.204
-_SUCCESS_GREEN_GREEN = 0.780
-_SUCCESS_GREEN_BLUE = 0.349
+_SUCCESS_GREEN_RED = 0.35
+_SUCCESS_GREEN_GREEN = 0.82
+_SUCCESS_GREEN_BLUE = 0.60
 
 # Module-level back-reference so the ObjC view can call overlay.hide()
 _overlay_ref = None  # type: OverlayIndicator | None
@@ -153,25 +153,15 @@ class _PillView:
                 _NSBezierPath.bezierPathWithOvalInRect_(dot_rect).fill()
 
             def _draw_processing_dots(self, rect):
-                """Draw 3 animated dots that cycle opacity left to right."""
-                dot_size = 5
-                spacing = 10
-                start_x = 18
+                """Draw a single white dot on the left side during processing."""
+                dot_size = 8
+                dot_x = 18
                 dot_y = (rect.size.height - dot_size) / 2
-
-                for i in range(3):
-                    if i == self._dot_phase % 3:
-                        alpha = 1.0
-                    elif i == (self._dot_phase - 1) % 3:
-                        alpha = 0.5
-                    else:
-                        alpha = 0.25
-                    x = start_x + i * (dot_size + spacing)
-                    dot_rect = ((x, dot_y), (dot_size, dot_size))
-                    _NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                        1.0, 1.0, 1.0, alpha
-                    ).set()
-                    _NSBezierPath.bezierPathWithOvalInRect_(dot_rect).fill()
+                dot_rect = ((dot_x, dot_y), (dot_size, dot_size))
+                _NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                    1.0, 1.0, 1.0, 0.7
+                ).set()
+                _NSBezierPath.bezierPathWithOvalInRect_(dot_rect).fill()
 
             def _draw_success_dot(self, rect):
                 """Draw a green dot on the left side for success state."""
@@ -202,9 +192,11 @@ class _PillView:
                 self.setNeedsDisplay_(True)
 
             def cycleDotsTimer_(self, timer):
-                """Advance the processing dots animation phase."""
-                self._dot_phase = (self._dot_phase + 1) % 3
-                self.setNeedsDisplay_(True)
+                """Animate 'Processing' text with cycling ellipsis."""
+                self._dot_phase = (self._dot_phase + 1) % 4
+                dots = "." * self._dot_phase
+                if _overlay_ref is not None and _overlay_ref._label is not None:
+                    _overlay_ref._label.setStringValue_(f"Processing{dots}")
 
             def successHideTimer_(self, timer):
                 """Auto-hide overlay after success flash."""
@@ -427,12 +419,7 @@ class OverlayIndicator:
                 self._pill_view._bg_red = _BG_RED
                 self._pill_view._bg_green = _BG_GREEN
                 self._pill_view._bg_blue = _BG_BLUE
-                self._label.setTextColor_(
-                    _NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                        _SUCCESS_GREEN_RED, _SUCCESS_GREEN_GREEN,
-                        _SUCCESS_GREEN_BLUE, 1.0,
-                    )
-                )
+                self._label.setTextColor_(_NSColor.whiteColor())
                 self._label.setStringValue_("Done")
                 self._pill_view.setNeedsDisplay_(True)
                 self._panel.orderFrontRegardless()
