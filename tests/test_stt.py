@@ -5,10 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from voiceflow.config import STTConfig
-
 
 # ---------------------------------------------------------------------------
 # WhisperSTT
@@ -277,3 +275,83 @@ class TestSTTConfigDefaults:
         )
         assert cfg.backend == "whisper"
         assert cfg.whisper_model == "mlx-community/whisper-small"
+
+
+# ---------------------------------------------------------------------------
+# _is_sensevoice_cached
+# ---------------------------------------------------------------------------
+
+
+class TestSenseVoiceCacheCheck:
+    def test_is_sensevoice_cached_exists(self, tmp_path) -> None:
+        """Returns True when model.pt exists at expected cache path."""
+        from voiceflow.stt import _is_sensevoice_cached
+
+        model_dir = tmp_path / ".cache" / "modelscope" / "hub" / "models" / "iic" / "SenseVoiceSmall"
+        model_dir.mkdir(parents=True)
+        (model_dir / "model.pt").touch()
+
+        with patch("voiceflow.stt.Path.home", return_value=tmp_path):
+            assert _is_sensevoice_cached("iic/SenseVoiceSmall") is True
+
+    def test_is_sensevoice_cached_not_exists(self, tmp_path) -> None:
+        """Returns False when model.pt does not exist."""
+        from voiceflow.stt import _is_sensevoice_cached
+
+        with patch("voiceflow.stt.Path.home", return_value=tmp_path):
+            assert _is_sensevoice_cached("iic/SenseVoiceSmall") is False
+
+    def test_is_sensevoice_cached_exception(self) -> None:
+        """Returns False when Path.home() raises an exception."""
+        from voiceflow.stt import _is_sensevoice_cached
+
+        with patch("voiceflow.stt.Path.home", side_effect=RuntimeError("no home")):
+            assert _is_sensevoice_cached("iic/SenseVoiceSmall") is False
+
+
+# ---------------------------------------------------------------------------
+# ensure_sensevoice_downloaded
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureSenseVoiceDownloaded:
+    def test_already_cached_skips_download(self) -> None:
+        """When model is cached, snapshot_download is NOT called."""
+        from voiceflow.stt import ensure_sensevoice_downloaded
+
+        mock_snapshot = MagicMock()
+        with (
+            patch("voiceflow.stt._is_sensevoice_cached", return_value=True),
+            patch.dict("sys.modules", {"modelscope.hub.snapshot_download": MagicMock(snapshot_download=mock_snapshot)}),
+        ):
+            ensure_sensevoice_downloaded("iic/SenseVoiceSmall")
+
+        mock_snapshot.assert_not_called()
+
+    def test_not_cached_calls_snapshot_download(self) -> None:
+        """When model is NOT cached, snapshot_download is called with model name."""
+        from voiceflow.stt import ensure_sensevoice_downloaded
+
+        mock_snapshot = MagicMock()
+        mock_ms_module = MagicMock()
+        mock_ms_module.snapshot_download = mock_snapshot
+
+        with (
+            patch("voiceflow.stt._is_sensevoice_cached", return_value=False),
+            patch.dict("sys.modules", {
+                "modelscope": MagicMock(),
+                "modelscope.hub": MagicMock(),
+                "modelscope.hub.snapshot_download": mock_ms_module,
+            }),
+        ):
+            callback = MagicMock()
+            ensure_sensevoice_downloaded("iic/SenseVoiceSmall", progress_callback=callback)
+
+        mock_snapshot.assert_called_once()
+        call_args = mock_snapshot.call_args
+        assert call_args[0][0] == "iic/SenseVoiceSmall"
+        assert "progress_callbacks" in call_args[1]
+        assert len(call_args[1]["progress_callbacks"]) == 1
+        # progress_callback should have been called for start (0.0) and end (1.0)
+        callback.assert_any_call(0.0, "Downloading SenseVoiceSmall...")
+        callback.assert_any_call(1.0, "Download complete")

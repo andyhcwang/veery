@@ -19,11 +19,28 @@ logger = logging.getLogger(__name__)
 _TAG_PATTERN = re.compile(r"<\|[^|]*\|>")
 
 
+def _is_sensevoice_cached(model_name: str) -> bool:
+    """Check if a ModelScope model (e.g. SenseVoice) is already cached locally.
+
+    ModelScope stores models at ~/.cache/modelscope/hub/models/<org>/<name>/model.pt.
+    """
+    try:
+        cache_dir = Path.home() / ".cache" / "modelscope" / "hub" / "models"
+        # model_name is slash-separated like "iic/SenseVoiceSmall"
+        model_dir = cache_dir.joinpath(*model_name.split("/"))
+        return (model_dir / "model.pt").exists()
+    except Exception:
+        logger.debug("Could not check ModelScope cache for %s", model_name)
+        return False
+
+
 def _is_model_cached(repo_id: str) -> bool:
     """Check if a HuggingFace model is already fully cached locally.
 
     Uses a direct path check instead of scan_cache_dir() to avoid
     walking the entire HF cache directory (50-200ms on large caches).
+    Verifies that at least one large blob (>1MB) exists without an
+    ``.incomplete`` suffix, to avoid false positives from partial downloads.
     """
     try:
         from huggingface_hub.constants import HF_HUB_CACHE
@@ -33,7 +50,19 @@ def _is_model_cached(repo_id: str) -> bool:
             return False
         # A valid cached model has at least a snapshots/ dir with content
         snapshots = model_dir / "snapshots"
-        return snapshots.is_dir() and any(snapshots.iterdir())
+        if not snapshots.is_dir() or not any(snapshots.iterdir()):
+            return False
+        # Verify blobs contain at least one large complete file (weights).
+        # Incomplete downloads have a .incomplete suffix.
+        blobs = model_dir / "blobs"
+        if not blobs.is_dir():
+            return False
+        for blob in blobs.iterdir():
+            if blob.suffix == ".incomplete":
+                continue
+            if blob.is_file() and blob.stat().st_size > 1_000_000:
+                return True
+        return False
     except Exception:
         logger.debug("Could not check HF cache for %s", repo_id)
     return False
@@ -95,6 +124,64 @@ def ensure_model_downloaded(
     if progress_callback is not None:
         progress_callback(1.0, "Download complete")
     logger.info("Model %s downloaded", repo_id)
+
+
+def ensure_sensevoice_downloaded(
+    model_name: str,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> None:
+    """Pre-download a ModelScope model (SenseVoice) with progress tracking.
+
+    If the model is already cached, returns immediately. Otherwise downloads
+    via ``modelscope.hub.snapshot_download()`` and reports aggregate progress.
+
+    Args:
+        model_name: ModelScope model ID (e.g., "iic/SenseVoiceSmall").
+        progress_callback: Called with (fraction 0.0-1.0, detail_string).
+    """
+    if _is_sensevoice_cached(model_name):
+        logger.info("SenseVoice model %s already cached, skipping download", model_name)
+        return
+
+    logger.info("Downloading SenseVoice model %s ...", model_name)
+
+    if progress_callback is not None:
+        progress_callback(0.0, f"Downloading {model_name.split('/')[-1]}...")
+
+    from modelscope.hub.snapshot_download import snapshot_download
+
+    # Track aggregate progress across all files via closure
+    state = {"total_bytes": 0, "downloaded_bytes": 0}
+
+    class _AggregateProgress:
+        """ModelScope ProgressCallback subclass that aggregates per-file progress."""
+
+        def __init__(self, filename: str, file_size: int) -> None:
+            self._filename = filename
+            self._file_size = file_size
+            state["total_bytes"] += file_size
+
+        def update(self, size: int) -> None:
+            state["downloaded_bytes"] += size
+            if progress_callback is not None and state["total_bytes"] > 0:
+                fraction = min(state["downloaded_bytes"] / state["total_bytes"], 1.0)
+                name = model_name.split("/")[-1]
+                dl_mb = state["downloaded_bytes"] / (1024 * 1024)
+                tot_mb = state["total_bytes"] / (1024 * 1024)
+                if tot_mb >= 1024:
+                    detail = f"Downloading {name} ({dl_mb / 1024:.1f} / {tot_mb / 1024:.1f} GB)..."
+                else:
+                    detail = f"Downloading {name} ({dl_mb:.0f} / {tot_mb:.0f} MB)..."
+                progress_callback(fraction, detail)
+
+        def end(self) -> None:
+            pass
+
+    snapshot_download(model_name, progress_callbacks=[_AggregateProgress])
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Download complete")
+    logger.info("SenseVoice model %s downloaded", model_name)
 
 
 class SenseVoiceSTT:
@@ -180,7 +267,9 @@ class WhisperSTT:
         self._loaded = False
         # Pre-allocate a single temp WAV file reused across transcriptions
         # to avoid create/delete overhead on every call (~5-15ms savings).
-        self._tmp_wav: str = tempfile.mktemp(suffix=".wav")
+        _f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        self._tmp_wav: str = _f.name
+        _f.close()
 
     def load_model(self) -> None:
         """Warm up the Whisper model by running a dummy transcription.

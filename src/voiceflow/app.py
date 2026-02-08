@@ -29,8 +29,10 @@ from voiceflow.stt import (
     SenseVoiceSTT,
     WhisperSTT,
     _is_model_cached,
+    _is_sensevoice_cached,
     create_stt,
     ensure_model_downloaded,
+    ensure_sensevoice_downloaded,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,6 +128,10 @@ class VoiceFlowApp(rumps.App):
         # Signals that all models are loaded and app is ready
         self._ready = threading.Event()
 
+        # Progressive loading: tracks background Whisper download
+        self._whisper_loading: bool = False
+        self._whisper_download_cancelled: bool = False
+
         self._permission_overlay = PermissionGuideOverlay()
 
         self._initialize_components()
@@ -180,6 +186,12 @@ class VoiceFlowApp(rumps.App):
     def _load_models(self) -> None:
         """Background thread: download/load heavy models with menubar status.
 
+        Progressive loading strategy for first-run UX:
+        - If Whisper is cached: load it directly (fast path, ~15s)
+        - If Whisper is NOT cached and backend is "whisper": load SenseVoice first
+          so user can dictate immediately, then download Whisper in the background
+        - If backend is "sensevoice": load SenseVoice directly
+
         Shows a DownloadProgressOverlay when models need to be downloaded for the
         first time. If models are already cached, skips the overlay entirely.
         """
@@ -195,30 +207,72 @@ class VoiceFlowApp(rumps.App):
             # Pre-load audio feedback sounds so first recording has no delay
             sounds.preload()
 
-            # Pre-download Whisper model from HuggingFace Hub with progress overlay.
-            # SenseVoice uses ModelScope (not HF Hub), so FunASR handles its own download.
             stt_cfg = self._config.stt
-            if stt_cfg.backend == "whisper" and not _is_model_cached(stt_cfg.whisper_model):
-                download_overlay = DownloadProgressOverlay()
-                download_overlay.show()
-                self._detail_item.title = "Downloading model..."
+            whisper_cached = _is_model_cached(stt_cfg.whisper_model)
 
-                def _progress(fraction: float, detail: str) -> None:
+            if stt_cfg.backend == "whisper" and whisper_cached:
+                # Fast path: Whisper already cached, load directly
+                self._detail_item.title = "Loading Whisper..."
+                self._stt = create_stt(stt_cfg)
+                logger.info("STT loaded (backend=whisper, cached)")
+
+            elif stt_cfg.backend == "whisper" and not whisper_cached:
+                # Progressive path: load SenseVoice first, then Whisper in background
+                from dataclasses import replace
+
+                if not _is_sensevoice_cached(stt_cfg.model_name):
+                    download_overlay = DownloadProgressOverlay()
+                    download_overlay.show()
+                    self._detail_item.title = "Downloading SenseVoice..."
+
+                    def _sv_progress(fraction: float, detail: str) -> None:
+                        if download_overlay is not None:
+                            download_overlay.set_progress(fraction, detail)
+
+                    ensure_sensevoice_downloaded(stt_cfg.model_name, progress_callback=_sv_progress)
                     if download_overlay is not None:
-                        download_overlay.set_progress(fraction, detail)
+                        download_overlay.set_progress(1.0, "Loading model into memory...")
 
-                ensure_model_downloaded(stt_cfg.whisper_model, progress_callback=_progress)
-                download_overlay.set_progress(1.0, "Loading model into memory...")
+                self._detail_item.title = "Loading SenseVoice..."
+                sv_config = replace(stt_cfg, backend="sensevoice")
+                self._stt = create_stt(sv_config)
+                logger.info("STT loaded (backend=sensevoice, progressive)")
+
+                # Hide download overlay before marking ready
+                if download_overlay is not None:
+                    download_overlay.hide()
+                    download_overlay = None
+
+                # User can dictate now
+                self.title = "\U0001f3a4"
+                self._detail_item.title = "Ready"
+                self._ready.set()
+                self._update_stt_checkmarks("sensevoice")
+                logger.info("STT ready — accepting dictation (SenseVoice while Whisper downloads)")
+
+                # Spawn background Whisper download
+                threading.Thread(target=self._load_whisper_background, daemon=True).start()
+                return
+
             else:
-                backend_label = next(
-                    (label for bid, label in STT_BACKENDS if bid == stt_cfg.backend),
-                    stt_cfg.backend,
-                )
-                self._detail_item.title = f"Loading {backend_label}..."
+                # SenseVoice backend: download with overlay if needed, then load
+                if not _is_sensevoice_cached(stt_cfg.model_name):
+                    download_overlay = DownloadProgressOverlay()
+                    download_overlay.show()
+                    self._detail_item.title = "Downloading SenseVoice..."
 
-            # STT model
-            self._stt = create_stt(stt_cfg)
-            logger.info("STT loaded (backend=%s)", stt_cfg.backend)
+                    def _sv_progress2(fraction: float, detail: str) -> None:
+                        if download_overlay is not None:
+                            download_overlay.set_progress(fraction, detail)
+
+                    ensure_sensevoice_downloaded(stt_cfg.model_name, progress_callback=_sv_progress2)
+                    if download_overlay is not None:
+                        download_overlay.set_progress(1.0, "Loading model into memory...")
+                else:
+                    self._detail_item.title = "Loading SenseVoice..."
+
+                self._stt = create_stt(stt_cfg)
+                logger.info("STT loaded (backend=sensevoice)")
 
             # Hide download overlay if it was shown
             if download_overlay is not None:
@@ -236,6 +290,44 @@ class VoiceFlowApp(rumps.App):
             self.title = "\u26a0"  # warning
             self._detail_item.title = "Model load failed"
             self._ready.set()  # unblock anyway
+
+    def _load_whisper_background(self) -> None:
+        """Background thread: download Whisper and auto-switch when ready.
+
+        Shows progress only in the menubar detail item (no overlay).
+        """
+        stt_cfg = self._config.stt
+        self._whisper_loading = True
+        try:
+            def _progress(fraction: float, detail: str) -> None:
+                pct = int(fraction * 100)
+                self._detail_item.title = f"Ready (Whisper: {pct}%)"
+
+            ensure_model_downloaded(stt_cfg.whisper_model, progress_callback=_progress)
+            self._detail_item.title = "Ready (loading Whisper...)"
+
+            # Load and warm up Whisper
+            new_stt = create_stt(stt_cfg)
+
+            if not self._whisper_download_cancelled:
+                self._stt = new_stt
+                self._update_stt_checkmarks("whisper")
+                self._detail_item.title = "Ready"
+                logger.info("Auto-switched to Whisper backend")
+            else:
+                logger.info("Whisper downloaded but user switched backend, skipping auto-switch")
+                self._detail_item.title = "Ready"
+        except Exception:
+            logger.exception("Background Whisper download/load failed")
+            self._detail_item.title = "Ready (Whisper failed)"
+        finally:
+            self._whisper_loading = False
+
+    def _update_stt_checkmarks(self, backend_id: str) -> None:
+        """Update STT menu checkmarks and internal backend state."""
+        self._stt_backend = backend_id
+        for bid, item in self._stt_menu_items.items():
+            item.state = 1 if bid == backend_id else 0
 
     def _start_hotkey_listener(self) -> None:
         """Start push-to-talk listener: hold right Cmd to record, release to process."""
@@ -415,11 +507,12 @@ class VoiceFlowApp(rumps.App):
         """
         success = False
         try:
-            if self._stt is None:
+            stt = self._stt
+            if stt is None:
                 rumps.notification("VoiceFlow", "Error", "STT model not available")
                 return
 
-            raw_text = self._stt.transcribe(segment.audio, segment.sample_rate)
+            raw_text = stt.transcribe(segment.audio, segment.sample_rate)
             if not raw_text:
                 self._overlay.show_warning("No transcription")
                 return
@@ -506,10 +599,11 @@ class VoiceFlowApp(rumps.App):
         if backend_id == self._stt_backend and self._stt is not None:
             return  # already active
 
-        # Update checkmarks
-        for bid, item in self._stt_menu_items.items():
-            item.state = 1 if bid == backend_id else 0
+        # Cancel auto-switch if Whisper is downloading in background
+        if self._whisper_loading:
+            self._whisper_download_cancelled = True
 
+        self._update_stt_checkmarks(backend_id)
         self._detail_item.title = "Switching STT model..."
         logger.info("User selected STT backend: %s", backend_id)
 
