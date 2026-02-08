@@ -54,22 +54,21 @@ def ensure_model_downloaded(
     logger.info("Downloading model %s ...", repo_id)
 
     from huggingface_hub import snapshot_download
-    from huggingface_hub.utils import tqdm as hf_tqdm
+    from huggingface_hub.utils import _tqdm as hf_tqdm_module
+    from huggingface_hub.utils import tqdm as OriginalTqdm
 
     if progress_callback is not None:
         progress_callback(0.0, f"Downloading {repo_id}...")
 
-    # Monkey-patch tqdm to capture download progress
-    _original_tqdm = hf_tqdm.tqdm
-
-    class _ProgressTqdm(_original_tqdm):
+    # Monkey-patch tqdm at the internal module level to capture download progress.
+    # huggingface_hub.utils._tqdm is the module; its .tqdm attribute is the class.
+    class _ProgressTqdm(OriginalTqdm):
         """Wraps HF's tqdm to forward progress to our callback."""
 
         def update(self, n=1):
             super().update(n)
             if self.total and self.total > 0 and progress_callback is not None:
                 fraction = self.n / self.total
-                # Format bytes nicely
                 downloaded_mb = self.n / (1024 * 1024)
                 total_mb = self.total / (1024 * 1024)
                 if total_mb >= 1024:
@@ -81,11 +80,11 @@ def ensure_model_downloaded(
                     detail = f"Downloading {repo_id.split('/')[-1]} ({downloaded_mb:.0f} / {total_mb:.0f} MB)..."
                 progress_callback(fraction, detail)
 
-    hf_tqdm.tqdm = _ProgressTqdm
+    hf_tqdm_module.tqdm = _ProgressTqdm
     try:
         snapshot_download(repo_id)
     finally:
-        hf_tqdm.tqdm = _original_tqdm
+        hf_tqdm_module.tqdm = OriginalTqdm
 
     if progress_callback is not None:
         progress_callback(1.0, "Download complete")

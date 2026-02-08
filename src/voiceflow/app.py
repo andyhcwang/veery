@@ -193,12 +193,10 @@ class VoiceFlowApp(rumps.App):
                 self._recorder._ensure_vad_loaded()
                 logger.info("VAD model pre-loaded")
 
-            # Check if STT model needs downloading
+            # Pre-download Whisper model from HuggingFace Hub with progress overlay.
+            # SenseVoice uses ModelScope (not HF Hub), so FunASR handles its own download.
             stt_cfg = self._config.stt
-            repo_id = stt_cfg.model_name if stt_cfg.backend != "whisper" else stt_cfg.whisper_model
-            needs_download = not _is_model_cached(repo_id)
-
-            if needs_download:
+            if stt_cfg.backend == "whisper" and not _is_model_cached(stt_cfg.whisper_model):
                 download_overlay = DownloadProgressOverlay()
                 download_overlay.show()
                 self._detail_item.title = "Downloading model..."
@@ -207,9 +205,7 @@ class VoiceFlowApp(rumps.App):
                     if download_overlay is not None:
                         download_overlay.set_progress(fraction, detail)
 
-                ensure_model_downloaded(repo_id, progress_callback=_progress)
-
-                # Update overlay to show warmup phase
+                ensure_model_downloaded(stt_cfg.whisper_model, progress_callback=_progress)
                 download_overlay.set_progress(1.0, "Loading model into memory...")
             else:
                 self._detail_item.title = "Loading STT model..."
@@ -549,15 +545,14 @@ class VoiceFlowApp(rumps.App):
             title=f"VoiceFlow v{__version__}",
             message=(
                 "macOS bilingual dictation for EN/ZH professionals.\n\n"
-                "Author: Cedric Wang\n"
-                "GitHub: github.com/shahdpinky/voiceflow\n"
-                "Email: haocheng.c.wang@gmail.com"
+                "Author: Haocheng Wang\n"
+                "X: x.com/AndyThinkMode"
             ),
             ok="Close",
-            other="Open GitHub",
+            other="Open X Profile",
         )
         if response == 0:  # "Other" button
-            webbrowser.open("https://github.com/shahdpinky/voiceflow")
+            webbrowser.open("https://x.com/AndyThinkMode")
 
     def _on_quit(self, _sender) -> None:
         """Clean shutdown."""
