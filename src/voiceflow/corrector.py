@@ -1,14 +1,37 @@
-"""Text correction pipeline: jargon replacement then grammar polishing."""
+"""Text correction pipeline: jargon replacement and filler removal."""
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
-from voiceflow.grammar import GrammarPolisher
 from voiceflow.jargon import JargonCorrector
 
 logger = logging.getLogger(__name__)
+
+# Filler words/phrases to remove (case-insensitive, word-boundary-aware)
+_EN_FILLERS = [
+    r"\bum\b", r"\buh\b", r"\bumm\b", r"\buhh\b",
+    r"\byou know\b", r"\bI mean\b",
+    r"\bbasically\b", r"\bliterally\b",
+]
+_ZH_FILLERS = [
+    "嗯", "额", "啊", "呃",
+    "那个", "就是说", "然后吧",
+]
+_FILLER_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _EN_FILLERS]
+_FILLER_PATTERNS += [re.compile(re.escape(f)) for f in _ZH_FILLERS]
+# Clean up multiple spaces left after removal
+_MULTI_SPACE = re.compile(r"  +")
+
+
+def remove_fillers(text: str) -> str:
+    """Remove common filler words/sounds from transcribed text."""
+    for pat in _FILLER_PATTERNS:
+        text = pat.sub("", text)
+    text = _MULTI_SPACE.sub(" ", text).strip()
+    return text
 
 
 @dataclass
@@ -17,15 +40,14 @@ class CorrectionResult:
 
     raw: str  # Original STT output
     jargon_corrected: str  # After jargon dict correction
-    final: str  # After grammar polish (or jargon_corrected if grammar disabled/failed)
+    final: str  # After filler removal
 
 
 class TextCorrector:
-    """Orchestrates the correction pipeline: jargon -> grammar."""
+    """Orchestrates the correction pipeline: jargon -> fillers."""
 
-    def __init__(self, jargon: JargonCorrector, grammar: GrammarPolisher) -> None:
+    def __init__(self, jargon: JargonCorrector) -> None:
         self._jargon = jargon
-        self._grammar = grammar
 
     def correct(self, raw_text: str) -> CorrectionResult:
         """Run the full correction pipeline on raw STT output."""
@@ -40,9 +62,10 @@ class TextCorrector:
             jargon_corrected = raw_text
         logger.debug("Jargon stage: %r -> %r", raw_text, jargon_corrected)
 
-        # Stage 2: Grammar polishing
-        final = self._grammar.polish(jargon_corrected)
-        logger.debug("Grammar stage: %r -> %r", jargon_corrected, final)
+        # Stage 2: Filler word removal
+        final = remove_fillers(jargon_corrected)
+        if final != jargon_corrected:
+            logger.debug("Filler removal: %r -> %r", jargon_corrected, final)
 
         return CorrectionResult(
             raw=raw_text,

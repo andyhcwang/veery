@@ -14,12 +14,12 @@ dependencies = [
     "torch>=2.2",
     "torchaudio>=2.2",
     "funasr>=1.1",
+    "mlx-whisper>=0.4",
+    "soundfile>=0.12",
+    "tiktoken>=0.7",  # Pin to version with pre-built wheels (mlx-whisper dep)
     # Pin llvmlite/numba for Python 3.13 compat (funasr→umap-learn→pynndescent→llvmlite)
     "llvmlite>=0.44",
     "numba>=0.61",
-    # Grammar LLM
-    "mlx>=0.22",
-    "mlx-lm>=0.21",
     # Jargon
     "rapidfuzz>=3.6",
     "pyyaml>=6.0",

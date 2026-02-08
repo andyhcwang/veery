@@ -12,7 +12,6 @@ import pytest
 from voiceflow.config import (
     AppConfig,
     AudioConfig,
-    GrammarConfig,
     JargonConfig,
     OutputConfig,
     PROJECT_ROOT,
@@ -21,7 +20,6 @@ from voiceflow.config import (
     load_config,
 )
 from voiceflow.corrector import TextCorrector
-from voiceflow.grammar import GrammarPolisher
 from voiceflow.jargon import JargonCorrector
 from voiceflow.stt import _extract_text, _strip_tags
 
@@ -41,16 +39,8 @@ def jargon_corrector() -> JargonCorrector:
 
 
 @pytest.fixture
-def identity_grammar() -> GrammarPolisher:
-    """Mock GrammarPolisher that returns input unchanged (no mlx_lm needed)."""
-    mock = MagicMock(spec=GrammarPolisher)
-    mock.polish = MagicMock(side_effect=lambda text: text)
-    return mock
-
-
-@pytest.fixture
-def text_corrector(jargon_corrector: JargonCorrector, identity_grammar: GrammarPolisher) -> TextCorrector:
-    return TextCorrector(jargon=jargon_corrector, grammar=identity_grammar)
+def text_corrector(jargon_corrector: JargonCorrector) -> TextCorrector:
+    return TextCorrector(jargon=jargon_corrector)
 
 
 # ---------------------------------------------------------------------------
@@ -188,18 +178,16 @@ class TestConfigLoadsDefaults:
         assert config.audio.max_duration_sec == 30.0
 
         assert isinstance(config.vad, VADConfig)
-        assert config.vad.threshold == 0.5
-        assert config.vad.silence_duration_sec == 1.5
+        assert config.vad.threshold == 0.4
+        assert config.vad.silence_duration_sec == 2.0
         assert config.vad.min_speech_duration_sec == 0.3
 
         assert isinstance(config.stt, STTConfig)
         assert config.stt.model_name == "iic/SenseVoiceSmall"
         assert config.stt.language == "auto"
         assert config.stt.device == "cpu"
-
-        assert isinstance(config.grammar, GrammarConfig)
-        assert config.grammar.enabled is True
-        assert config.grammar.lazy_load is True
+        assert config.stt.backend == "sensevoice"
+        assert config.stt.whisper_model == "mlx-community/whisper-large-v3-turbo"
 
         assert isinstance(config.jargon, JargonConfig)
         assert len(config.jargon.dict_paths) == 2
@@ -235,9 +223,6 @@ class TestConfigFromYAML:
             stt:
               model_name: "custom/model"
               device: "mps"
-            grammar:
-              enabled: false
-              temperature: 0.5
             jargon:
               dict_paths:
                 - "custom/dict.yaml"
@@ -257,11 +242,27 @@ class TestConfigFromYAML:
         assert config.vad.silence_duration_sec == 2.0
         assert config.stt.model_name == "custom/model"
         assert config.stt.device == "mps"
-        assert config.grammar.enabled is False
-        assert config.grammar.temperature == 0.5
         assert config.jargon.dict_paths == ("custom/dict.yaml",)
         assert config.jargon.fuzzy_threshold == 90
         assert config.output.cgevent_char_limit == 1000
+
+    def test_config_from_yaml_whisper_backend(self, tmp_path: Path) -> None:
+        """Verify YAML override for STT whisper backend fields."""
+        yaml_content = textwrap.dedent("""\
+            stt:
+              backend: "whisper"
+              whisper_model: "mlx-community/whisper-small"
+        """)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml_content)
+
+        config = load_config(config_file)
+
+        assert config.stt.backend == "whisper"
+        assert config.stt.whisper_model == "mlx-community/whisper-small"
+        # Defaults preserved for other STT fields
+        assert config.stt.model_name == "iic/SenseVoiceSmall"
+        assert config.stt.language == "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -275,8 +276,6 @@ class TestConfigPartialYAML:
         yaml_content = textwrap.dedent("""\
             audio:
               sample_rate: 8000
-            grammar:
-              enabled: false
         """)
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml_content)
@@ -285,14 +284,13 @@ class TestConfigPartialYAML:
 
         # Overridden fields
         assert config.audio.sample_rate == 8000
-        assert config.grammar.enabled is False
 
         # Default-filled fields
         assert config.audio.channels == 1  # default
         assert config.audio.max_duration_sec == 30.0  # default
-        assert config.vad.threshold == 0.5  # entire section defaulted
+        assert config.vad.threshold == 0.4  # entire section defaulted
         assert config.stt.model_name == "iic/SenseVoiceSmall"  # default
-        assert config.jargon.fuzzy_threshold == 85  # default
+        assert config.jargon.fuzzy_threshold == 82  # default
         assert config.output.cgevent_char_limit == 500  # default
 
     def test_config_nonexistent_file(self) -> None:
@@ -307,7 +305,6 @@ class TestConfigPartialYAML:
 
         config = load_config(config_file)
         assert config.audio.sample_rate == 16000
-        assert config.grammar.enabled is True
 
 
 # ---------------------------------------------------------------------------
@@ -349,38 +346,7 @@ class TestMixedChineseEnglishJargon:
 
 
 # ---------------------------------------------------------------------------
-# 9. Corrector with grammar mock that adds a period
-# ---------------------------------------------------------------------------
-
-
-class TestCorrectorWithGrammarMock:
-    def test_corrector_with_grammar_mock(self, jargon_corrector: JargonCorrector) -> None:
-        """TextCorrector with real jargon + mock grammar that adds a period."""
-        mock_grammar = MagicMock(spec=GrammarPolisher)
-        mock_grammar.polish = MagicMock(side_effect=lambda text: text.rstrip(".") + ".")
-        tc = TextCorrector(jargon=jargon_corrector, grammar=mock_grammar)
-
-        result = tc.correct("the sharp ratio is good")
-        # Jargon stage corrects "sharp ratio" -> "Sharpe ratio"
-        assert result.jargon_corrected == "the Sharpe ratio is good"
-        # Grammar stage adds a period
-        assert result.final == "the Sharpe ratio is good."
-
-    def test_corrector_grammar_capitalizes(self, jargon_corrector: JargonCorrector) -> None:
-        """Mock grammar that capitalizes first letter, verify chain works."""
-        mock_grammar = MagicMock(spec=GrammarPolisher)
-        mock_grammar.polish = MagicMock(side_effect=lambda text: text[0].upper() + text[1:] if text else text)
-        tc = TextCorrector(jargon=jargon_corrector, grammar=mock_grammar)
-
-        result = tc.correct("the pnl report is ready")
-        assert "PnL" in result.jargon_corrected
-        # Grammar capitalizes first char
-        assert result.final[0] == "T"
-        assert "PnL" in result.final
-
-
-# ---------------------------------------------------------------------------
-# 10. STT tag stripping
+# 9. STT tag stripping
 # ---------------------------------------------------------------------------
 
 

@@ -106,13 +106,15 @@ class AudioRecorder:
     # Public API
     # ------------------------------------------------------------------
 
-    def start_recording(self) -> None:
-        """Open the audio stream and begin VAD monitoring.
+    def prepare_stream(self) -> None:
+        """Open and start the audio stream immediately (call from hotkey thread).
 
-        The stream runs until stop_recording() is called or VAD detects
-        end of speech.
+        Audio chunks are buffered via the callback even before start_recording()
+        finalizes state. This eliminates stream startup latency from the
+        user-perceived recording delay.
         """
-        self._ensure_vad_loaded()
+        if self._stream is not None:
+            return  # already open
 
         with self._lock:
             # Reset state for a new recording
@@ -120,8 +122,8 @@ class AudioRecorder:
             self._buffer = deque(maxlen=max_chunks)
             self._raw_buffer = deque(maxlen=max_chunks)
 
-            # Pre-speech buffer: ~300ms worth of chunks
-            pre_speech_chunks = max(1, 300 // self._audio_cfg.chunk_duration_ms)
+            # Pre-speech buffer: ~500ms worth of chunks to capture speech onset
+            pre_speech_chunks = max(1, 500 // self._audio_cfg.chunk_duration_ms)
             self._pre_speech_buffer = deque(maxlen=pre_speech_chunks)
 
             self._state = _State.WAITING
@@ -141,6 +143,18 @@ class AudioRecorder:
             callback=self._audio_callback,
         )
         self._stream.start()
+        logger.info("Audio stream opened and capturing.")
+
+    def start_recording(self) -> None:
+        """Finalize recording setup (stream should already be open via prepare_stream).
+
+        If the stream isn't open yet (e.g. direct call), opens it as a fallback.
+        """
+        self._ensure_vad_loaded()
+
+        if self._stream is None or not self._stream.active:
+            self.prepare_stream()
+
         logger.info("Recording started.")
 
     def stop_recording(self) -> AudioSegment | None:

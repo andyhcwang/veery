@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import enum
+import functools
 import logging
 import subprocess
 import threading
@@ -12,15 +13,15 @@ import time
 
 import rumps
 
+from voiceflow import __version__
 from voiceflow.audio import AudioRecorder
-from voiceflow.config import PROJECT_ROOT, AppConfig, load_config
+from voiceflow.config import PROJECT_ROOT, STT_BACKENDS, AppConfig, load_config
 from voiceflow.corrector import TextCorrector
-from voiceflow.grammar import GrammarPolisher
 from voiceflow.jargon import JargonCorrector
 from voiceflow.learner import CorrectionLearner
 from voiceflow.output import paste_to_active_app
 from voiceflow.overlay import OverlayIndicator
-from voiceflow.stt import SenseVoiceSTT
+from voiceflow.stt import SenseVoiceSTT, WhisperSTT, create_stt
 
 logger = logging.getLogger(__name__)
 
@@ -58,21 +59,56 @@ class VoiceFlowApp(rumps.App):
         self._state_lock = threading.Lock()
 
         # Menu items
-        self._status_item = rumps.MenuItem("VoiceFlow \u2014 Ready", callback=None)
+        self._status_item = rumps.MenuItem(f"VoiceFlow v{__version__}", callback=None)
         self._status_item.set_callback(None)
-        self._edit_jargon_item = rumps.MenuItem("Edit Jargon Dictionary", callback=self._on_edit_jargon)
+
+        # Status detail (shows model state or last action)
+        self._detail_item = rumps.MenuItem("Loading models...", callback=None)
+        self._detail_item.set_callback(None)
+
+        # Recording mode: "hold" (push-to-talk) or "toggle" (press-to-toggle)
+        self._recording_mode: str = self._config.hotkey.mode
+
+        # Hotkey info (updates based on mode)
+        self._hotkey_item = rumps.MenuItem(self._hotkey_hint(), callback=None)
+        self._hotkey_item.set_callback(None)
+
+        # Recording mode toggle
+        self._mode_item = rumps.MenuItem(
+            "Toggle Mode (press to start/stop)",
+            callback=self._on_toggle_mode,
+        )
+        self._mode_item.state = 1 if self._recording_mode == "toggle" else 0
+
+        # STT backend selector submenu
+        self._stt_backend: str = self._config.stt.backend
+        self._stt_model_menu = rumps.MenuItem("STT Model")
+        self._stt_menu_items: dict[str, rumps.MenuItem] = {}
+        self._build_stt_model_submenu()
+
+        # Jargon submenu
+        self._edit_jargon_menu = rumps.MenuItem("Jargon Dictionaries")
+        self._build_jargon_submenu()
 
         self.menu = [
             self._status_item,
+            self._detail_item,
             None,  # separator
-            self._edit_jargon_item,
+            self._hotkey_item,
+            self._mode_item,
+            self._stt_model_menu,
             None,  # separator
-            rumps.MenuItem("Quit", callback=self._on_quit),
+            self._edit_jargon_menu,
+            None,  # separator
+            rumps.MenuItem("Quit VoiceFlow", callback=self._on_quit),
         ]
+
+        # Track stats
+        self._session_count: int = 0
 
         # Components (initialized below)
         self._recorder: AudioRecorder | None = None
-        self._stt: SenseVoiceSTT | None = None
+        self._stt: SenseVoiceSTT | WhisperSTT | None = None
         self._corrector: TextCorrector | None = None
         self._learner: CorrectionLearner | None = None
         self._hotkey_listener = None
@@ -105,11 +141,10 @@ class VoiceFlowApp(rumps.App):
         except Exception:
             logger.exception("Failed to initialize AudioRecorder")
 
-        # 2. Jargon (lightweight, no model download)
+        # 2. Jargon + corrector (lightweight, no model download)
         try:
             jargon = JargonCorrector(self._config.jargon)
-            grammar = GrammarPolisher(self._config.grammar)
-            self._corrector = TextCorrector(jargon, grammar)
+            self._corrector = TextCorrector(jargon)
             logger.info("TextCorrector initialized")
         except Exception:
             logger.exception("Failed to initialize TextCorrector")
@@ -138,26 +173,27 @@ class VoiceFlowApp(rumps.App):
     def _load_models(self) -> None:
         """Background thread: download/load heavy models with menubar status."""
         try:
-            # STT model
+            # VAD model (small, ~50MB — load first so recording is instant)
             self.title = "\u2b07"  # down arrow
-            self._status_item.title = "Loading STT model..."
-            self._stt = SenseVoiceSTT(self._config.stt)
-            logger.info("SenseVoiceSTT loaded")
+            if self._recorder is not None:
+                self._detail_item.title = "Loading VAD model..."
+                self._recorder._ensure_vad_loaded()
+                logger.info("VAD model pre-loaded")
 
-            # Grammar model
-            if self._config.grammar.enabled and self._corrector is not None:
-                self._status_item.title = "Loading grammar model..."
-                self._corrector._grammar.load()
-                logger.info("Grammar model loaded")
+            # STT model
+            self._detail_item.title = "Loading STT model..."
+            self._stt = create_stt(self._config.stt)
+            logger.info("STT loaded (backend=%s)", self._config.stt.backend)
 
+            # Ready for recording
             self.title = "\U0001f3a4"
-            self._status_item.title = "VoiceFlow \u2014 Ready"
+            self._detail_item.title = "Ready"
             self._ready.set()
-            logger.info("All models loaded — ready")
+            logger.info("STT ready — accepting dictation")
         except Exception:
             logger.exception("Failed to load models")
             self.title = "\u26a0"  # warning
-            self._status_item.title = "VoiceFlow \u2014 Model load failed"
+            self._detail_item.title = "Model load failed"
             self._ready.set()  # unblock anyway
 
     def _start_hotkey_listener(self) -> None:
@@ -195,47 +231,98 @@ class VoiceFlowApp(rumps.App):
 
         if new_state == State.IDLE:
             self.title = "\U0001f3a4"
-            self._status_item.title = "VoiceFlow \u2014 Ready"
+            self._detail_item.title = "Ready"
             self._overlay.hide()
         elif new_state == State.RECORDING:
             self.title = "\U0001f534"  # red circle
-            self._status_item.title = "Recording..."
+            self._detail_item.title = "Recording..."
             self._overlay.show_recording()
         elif new_state == State.PROCESSING:
             self.title = "\u231b"  # hourglass
-            self._status_item.title = "Processing..."
+            self._detail_item.title = "Processing..."
             self._overlay.show_processing()
 
     # ------------------------------------------------------------------
     # Hotkey handler
     # ------------------------------------------------------------------
 
+    def _hotkey_hint(self) -> str:
+        """Return the hotkey hint text based on current recording mode."""
+        if self._recording_mode == "toggle":
+            return "Press Right \u2318 to start/stop"
+        return "Hold Right \u2318 to dictate"
+
     def _on_key_down(self) -> None:
-        """Right Cmd pressed — start recording if idle (non-blocking)."""
+        """Right Cmd pressed — behavior depends on recording mode."""
         if not self._ready.is_set():
             return
-        with self._state_lock:
-            if self._state != State.IDLE:
-                return
-        self._recording_started.clear()
-        threading.Thread(target=self._start_recording, daemon=True).start()
+
+        if self._recording_mode == "toggle":
+            self._on_toggle_key()
+        else:
+            self._on_hold_key_down()
 
     def _on_key_up(self) -> None:
-        """Right Cmd released — wait for recording to be ready, then stop and process."""
+        """Right Cmd released — only used in hold mode."""
+        if self._recording_mode == "toggle":
+            return  # toggle mode ignores key release
+
         with self._state_lock:
             if self._state != State.RECORDING:
                 return
-        # Wait for recording stream to actually open (handles first-time VAD load)
         self._recording_started.wait(timeout=10)
         self._stop_recording()
 
+    def _begin_recording(self) -> None:
+        """Shared logic for starting a recording session (both hold and toggle modes).
+
+        Sets state to RECORDING immediately (before spawning background thread)
+        so that key release always sees the correct state. Opens the audio
+        stream on the current thread for minimum latency.
+        """
+        with self._state_lock:
+            if self._state != State.IDLE:
+                return
+            self._state = State.RECORDING  # set immediately to avoid race
+
+        self._recording_started.clear()
+        # Update UI for recording state
+        logger.info("State: idle -> recording")
+        self.title = "\U0001f534"  # red circle
+        self._detail_item.title = "Recording..."
+        self._overlay.show_recording()
+
+        if self._recorder is not None:
+            try:
+                self._recorder.prepare_stream()
+            except Exception:
+                logger.exception("Failed to prepare audio stream")
+                self._set_state(State.IDLE)
+                return
+        threading.Thread(target=self._start_recording, daemon=True).start()
+
+    def _on_hold_key_down(self) -> None:
+        """Hold mode: start recording on key press."""
+        self._begin_recording()
+
+    def _on_toggle_key(self) -> None:
+        """Toggle mode: press to start recording, press again to stop."""
+        with self._state_lock:
+            current = self._state
+        if current == State.IDLE:
+            self._begin_recording()
+        elif current == State.RECORDING:
+            self._recording_started.wait(timeout=10)
+            self._stop_recording()
+
     def _start_recording(self) -> None:
-        """Begin a new recording session (push-to-talk: stream stays open until key release)."""
+        """Finalize recording setup (state is already RECORDING, stream may already be open)."""
         if self._recorder is None:
             rumps.notification("VoiceFlow", "Error", "Audio recorder not available")
+            self._recording_started.set()
+            self._set_state(State.IDLE)
             return
 
-        self._set_state(State.RECORDING)
         try:
             self._recorder.start_recording()
             self._recording_started.set()
@@ -280,6 +367,7 @@ class VoiceFlowApp(rumps.App):
                 paste_to_active_app(raw_text, self._config.output)
                 self._last_pasted_text = raw_text
                 self._last_pasted_time = time.monotonic()
+                self._session_count += 1
                 return
 
             result = self._corrector.correct(raw_text)
@@ -291,12 +379,16 @@ class VoiceFlowApp(rumps.App):
             paste_to_active_app(result.final, self._config.output)
             self._last_pasted_text = result.final
             self._last_pasted_time = time.monotonic()
+            self._session_count += 1
 
         except Exception as e:
             logger.exception("Processing failed")
             rumps.notification("VoiceFlow", "Error", str(e))
         finally:
             self._set_state(State.IDLE)
+            if self._session_count > 0:
+                n = self._session_count
+                self._detail_item.title = f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session"
 
     def _try_auto_learn(self, new_text: str) -> None:
         """If the new dictation is similar to the last one, auto-learn the correction."""
@@ -325,13 +417,79 @@ class VoiceFlowApp(rumps.App):
     # Menu callbacks
     # ------------------------------------------------------------------
 
-    def _on_edit_jargon(self, _sender) -> None:
-        """Open the quant_finance.yaml jargon file in the default editor."""
-        jargon_path = PROJECT_ROOT / "jargon" / "quant_finance.yaml"
-        if jargon_path.exists():
-            subprocess.run(["open", str(jargon_path)], check=False)
+    def _on_toggle_mode(self, sender) -> None:
+        """Switch between hold-to-talk and press-to-toggle recording modes."""
+        sender.state = not sender.state
+        self._recording_mode = "toggle" if sender.state else "hold"
+        self._hotkey_item.title = self._hotkey_hint()
+        logger.info("Recording mode: %s", self._recording_mode)
+
+    def _build_stt_model_submenu(self) -> None:
+        """Populate the STT Model submenu with available backends."""
+        for backend_id, label in STT_BACKENDS:
+            item = rumps.MenuItem(label, callback=functools.partial(self._on_select_stt_backend, backend_id))
+            item.state = 1 if backend_id == self._stt_backend else 0
+            self._stt_model_menu.add(item)
+            self._stt_menu_items[backend_id] = item
+
+    def _on_select_stt_backend(self, backend_id, _sender) -> None:
+        """Switch STT backend at runtime."""
+        if backend_id == self._stt_backend and self._stt is not None:
+            return  # already active
+
+        # Update checkmarks
+        for bid, item in self._stt_menu_items.items():
+            item.state = 1 if bid == backend_id else 0
+
+        self._detail_item.title = "Switching STT model..."
+        logger.info("User selected STT backend: %s", backend_id)
+
+        def _switch():
+            try:
+                from dataclasses import replace
+                new_config = replace(self._config.stt, backend=backend_id)
+                new_stt = create_stt(new_config)
+                self._stt = new_stt
+                self._stt_backend = backend_id
+                self._detail_item.title = "Ready"
+                logger.info("STT backend switched to %s", backend_id)
+            except Exception:
+                logger.exception("Failed to switch STT backend to %s", backend_id)
+                self._detail_item.title = "Ready (STT switch failed)"
+
+        threading.Thread(target=_switch, daemon=True).start()
+
+    def _build_jargon_submenu(self) -> None:
+        """Populate the Edit Jargon Dictionary submenu with all active YAML files."""
+        from pathlib import Path
+
+        for dict_path_str in self._config.jargon.dict_paths:
+            path = Path(dict_path_str)
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+            item = rumps.MenuItem(
+                path.name,
+                callback=functools.partial(self._open_jargon_file, path),
+            )
+            self._edit_jargon_menu.add(item)
+
+        # Include learned.yaml if configured and exists
+        if self._config.jargon.learned_path is not None:
+            learned = Path(self._config.jargon.learned_path)
+            if not learned.is_absolute():
+                learned = PROJECT_ROOT / learned
+            if learned.exists():
+                self._edit_jargon_menu.add(rumps.MenuItem(
+                    learned.name,
+                    callback=functools.partial(self._open_jargon_file, learned),
+                ))
+
+    def _open_jargon_file(self, path, _sender) -> None:
+        """Open a jargon YAML file in the default editor."""
+        if path.exists():
+            subprocess.run(["open", str(path)], check=False)
         else:
-            rumps.notification("VoiceFlow", "", f"Jargon file not found: {jargon_path}")
+            rumps.notification("VoiceFlow", "", f"Jargon file not found: {path}")
 
     def _on_quit(self, _sender) -> None:
         """Clean shutdown."""

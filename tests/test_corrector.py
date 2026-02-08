@@ -1,14 +1,11 @@
-"""Tests for TextCorrector pipeline with mocked grammar polisher."""
+"""Tests for TextCorrector pipeline (jargon + filler removal)."""
 
 from __future__ import annotations
-
-from unittest.mock import MagicMock
 
 import pytest
 
 from voiceflow.config import PROJECT_ROOT, JargonConfig
-from voiceflow.corrector import TextCorrector
-from voiceflow.grammar import GrammarPolisher
+from voiceflow.corrector import TextCorrector, remove_fillers
 from voiceflow.jargon import JargonCorrector
 
 QUANT_DICT = str(PROJECT_ROOT / "jargon" / "quant_finance.yaml")
@@ -27,16 +24,8 @@ def jargon_corrector() -> JargonCorrector:
 
 
 @pytest.fixture
-def identity_grammar() -> GrammarPolisher:
-    """Mock GrammarPolisher that returns input unchanged."""
-    mock = MagicMock(spec=GrammarPolisher)
-    mock.polish = MagicMock(side_effect=lambda text: text)
-    return mock
-
-
-@pytest.fixture
-def text_corrector(jargon_corrector: JargonCorrector, identity_grammar: GrammarPolisher) -> TextCorrector:
-    return TextCorrector(jargon=jargon_corrector, grammar=identity_grammar)
+def text_corrector(jargon_corrector: JargonCorrector) -> TextCorrector:
+    return TextCorrector(jargon=jargon_corrector)
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +44,6 @@ class TestCorrectionResult:
         result = text_corrector.correct("sharp ratio")
         assert result.raw == "sharp ratio"
         assert result.jargon_corrected == "Sharpe ratio"
-        # Mock grammar is identity, so final == jargon_corrected
         assert result.final == result.jargon_corrected
 
     def test_no_correction_needed(self, text_corrector: TextCorrector) -> None:
@@ -68,32 +56,6 @@ class TestCorrectionResult:
         result = text_corrector.correct("the tee wap signal")
         assert result.raw == "the tee wap signal"
         assert "TWAP" in result.jargon_corrected
-        assert result.final == result.jargon_corrected
-
-
-# ---------------------------------------------------------------------------
-# Mock grammar tests
-# ---------------------------------------------------------------------------
-
-
-class TestGrammarMock:
-    def test_grammar_polisher_applied(self, jargon_corrector: JargonCorrector) -> None:
-        """Use a mock that uppercases input, verify final is uppercased."""
-        mock_grammar = MagicMock(spec=GrammarPolisher)
-        mock_grammar.polish = MagicMock(side_effect=lambda text: text.upper())
-        tc = TextCorrector(jargon=jargon_corrector, grammar=mock_grammar)
-
-        result = tc.correct("sharp ratio")
-        assert result.jargon_corrected == "Sharpe ratio"
-        assert result.final == "SHARPE RATIO"
-
-    def test_grammar_disabled(self, jargon_corrector: JargonCorrector) -> None:
-        """When grammar polisher returns input unchanged, final == jargon_corrected."""
-        mock_grammar = MagicMock(spec=GrammarPolisher)
-        mock_grammar.polish = MagicMock(side_effect=lambda text: text)
-        tc = TextCorrector(jargon=jargon_corrector, grammar=mock_grammar)
-
-        result = tc.correct("the pnl report")
         assert result.final == result.jargon_corrected
 
 
@@ -126,28 +88,63 @@ class TestFullPipeline:
 
 
 class TestErrorHandling:
-    def test_jargon_exception_falls_back_to_raw(self, identity_grammar: GrammarPolisher) -> None:
+    def test_jargon_exception_falls_back_to_raw(self) -> None:
         """If jargon.correct() raises, corrector falls back to raw text."""
+        from unittest.mock import MagicMock
+
         mock_jargon = MagicMock(spec=JargonCorrector)
         mock_jargon.correct = MagicMock(side_effect=RuntimeError("boom"))
-        tc = TextCorrector(jargon=mock_jargon, grammar=identity_grammar)
+        tc = TextCorrector(jargon=mock_jargon)
 
         result = tc.correct("some text")
         assert result.raw == "some text"
         assert result.jargon_corrected == "some text"
         assert result.final == "some text"
 
-    def test_grammar_exception_propagates(self, jargon_corrector: JargonCorrector) -> None:
-        """If grammar.polish() raises, the exception propagates (grammar handles its own errors internally)."""
-        mock_grammar = MagicMock(spec=GrammarPolisher)
-        mock_grammar.polish = MagicMock(side_effect=RuntimeError("model crash"))
-        tc = TextCorrector(jargon=jargon_corrector, grammar=mock_grammar)
-
-        with pytest.raises(RuntimeError, match="model crash"):
-            tc.correct("sharp ratio")
-
     def test_punctuation_preserved_in_pipeline(self, text_corrector: TextCorrector) -> None:
         """End-to-end: punctuation survives the full pipeline."""
         result = text_corrector.correct("the sharp ratio, is 2.5.")
         assert "Sharpe ratio," in result.jargon_corrected
         assert result.jargon_corrected.endswith(".")
+
+
+# ---------------------------------------------------------------------------
+# Filler word removal tests
+# ---------------------------------------------------------------------------
+
+
+class TestFillerRemoval:
+    def test_english_fillers(self) -> None:
+        assert remove_fillers("um I think the API is uh broken") == "I think the API is broken"
+
+    def test_chinese_fillers(self) -> None:
+        assert remove_fillers("嗯这个API额有问题") == "这个API有问题"
+
+    def test_no_fillers(self) -> None:
+        assert remove_fillers("the API is working") == "the API is working"
+
+    def test_empty_string(self) -> None:
+        assert remove_fillers("") == ""
+
+    def test_only_fillers(self) -> None:
+        result = remove_fillers("um uh")
+        assert result == ""
+
+    def test_preserves_legitimate_words(self) -> None:
+        # "like" as a verb should not be removed (word-boundary aware)
+        assert "like" in remove_fillers("I like this feature")
+
+    def test_mixed_fillers(self) -> None:
+        result = remove_fillers("um 嗯 the Kubernetes API you know is 额 broken")
+        assert "um" not in result.lower()
+        assert "嗯" not in result
+        assert "额" not in result
+        assert "Kubernetes" in result
+        assert "API" in result
+
+    def test_filler_in_pipeline(self, text_corrector: TextCorrector) -> None:
+        """Fillers are removed in the full correction pipeline."""
+        result = text_corrector.correct("um the sharp ratio is uh 2.5")
+        assert "um" not in result.final.lower()
+        assert "uh" not in result.final.lower()
+        assert "Sharpe ratio" in result.final

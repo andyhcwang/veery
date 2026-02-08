@@ -29,8 +29,8 @@ class AudioConfig:
 
 @dataclass(frozen=True)
 class VADConfig:
-    threshold: float = 0.5  # Speech probability threshold
-    silence_duration_sec: float = 1.5  # Silence after speech → stop
+    threshold: float = 0.4  # Speech probability threshold (lower for accented speech)
+    silence_duration_sec: float = 2.0  # Silence after speech → stop (longer for non-native pauses)
     min_speech_duration_sec: float = 0.3  # Minimum speech to count as valid
 
 
@@ -39,23 +39,21 @@ class STTConfig:
     model_name: str = "iic/SenseVoiceSmall"
     language: str = "auto"  # Auto-detect for code-switching
     device: str = "cpu"  # CPU is more reliable than MPS on macOS
+    backend: str = "sensevoice"  # "sensevoice" or "whisper"
+    whisper_model: str = "mlx-community/whisper-large-v3-turbo"
 
 
-@dataclass(frozen=True)
-class GrammarConfig:
-    model_name: str = "mlx-community/Qwen2.5-3B-Instruct-4bit"  # Fallback if Qwen3 unavailable
-    temperature: float = 0.3
-    max_tokens: int = 512
-    enabled: bool = True  # Can disable to skip grammar correction
-    lazy_load: bool = True  # Load on first use, not at startup
-    max_output_ratio: float = 2.0  # Discard if output > 2x input length (hallucination guard)
+STT_BACKENDS: tuple[tuple[str, str], ...] = (
+    ("sensevoice", "SenseVoice-Small (Chinese-optimized)"),
+    ("whisper", "Whisper Large-v3-turbo (accent-robust)"),
+)
 
 
 @dataclass(frozen=True)
 class JargonConfig:
     dict_paths: tuple[str, ...] = ("jargon/quant_finance.yaml", "jargon/tech.yaml")
     learned_path: str | None = "jargon/learned.yaml"  # Tier 2: auto-learned terms
-    fuzzy_threshold: int = 85  # rapidfuzz score_cutoff (0-100)
+    fuzzy_threshold: int = 82  # rapidfuzz score_cutoff (0-100, tuned down from 85 for accented STT)
     max_phrase_words: int = 3  # Try 3-word, 2-word, 1-word phrases
 
 
@@ -70,6 +68,7 @@ class LearningConfig:
 @dataclass(frozen=True)
 class HotkeyConfig:
     key_combo: str = "right_cmd"  # Push-to-talk: hold to record, release to process
+    mode: str = "hold"  # "hold" = push-to-talk, "toggle" = press-to-toggle
 
 
 @dataclass(frozen=True)
@@ -83,7 +82,6 @@ class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     vad: VADConfig = field(default_factory=VADConfig)
     stt: STTConfig = field(default_factory=STTConfig)
-    grammar: GrammarConfig = field(default_factory=GrammarConfig)
     jargon: JargonConfig = field(default_factory=JargonConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -105,7 +103,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         audio=AudioConfig(**raw.get("audio", {})),
         vad=VADConfig(**raw.get("vad", {})),
         stt=STTConfig(**raw.get("stt", {})),
-        grammar=GrammarConfig(**raw.get("grammar", {})),
         jargon=JargonConfig(
             **{
                 k: tuple(v) if k == "dict_paths" and isinstance(v, list) else v

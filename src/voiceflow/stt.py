@@ -1,9 +1,11 @@
-"""Speech-to-text via SenseVoice-Small (FunASR). CPU-only, bilingual EN/ZH."""
+"""Speech-to-text backends: SenseVoice-Small (FunASR) and Whisper (lightning-whisper-mlx)."""
 
 from __future__ import annotations
 
 import logging
 import re
+import tempfile
+from pathlib import Path
 
 import numpy as np
 
@@ -89,3 +91,87 @@ def _strip_tags(text: str) -> str:
     """Remove all SenseVoice special tokens and clean whitespace."""
     cleaned = _TAG_PATTERN.sub("", text)
     return cleaned.strip()
+
+
+class WhisperSTT:
+    """Wrapper around mlx-whisper for accent-robust multilingual STT on Apple Silicon."""
+
+    def __init__(self, config: STTConfig | None = None) -> None:
+        self._config = config or STTConfig()
+        self._loaded = False
+
+    def load_model(self) -> None:
+        """Warm up the Whisper model by running a dummy transcription.
+
+        mlx-whisper loads the model lazily on first transcribe() call.
+        We trigger that here so the first real transcription is fast.
+        """
+        if self._loaded:
+            return
+        tmp_path: str | None = None
+        try:
+            import mlx_whisper
+            import soundfile as sf
+
+            logger.info("Loading Whisper model: %s", self._config.whisper_model)
+            # Create a short silent WAV to trigger model download/load
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            sf.write(tmp_path, np.zeros(16000, dtype=np.float32), 16000)
+            mlx_whisper.transcribe(tmp_path, path_or_hf_repo=self._config.whisper_model)
+            self._loaded = True
+            logger.info("Whisper model loaded successfully")
+        except Exception:
+            logger.exception("Failed to load Whisper model")
+        finally:
+            if tmp_path is not None:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
+        """Transcribe a numpy audio array to text.
+
+        Args:
+            audio: 1-D float32 numpy array of audio samples.
+            sample_rate: Sample rate in Hz.
+
+        Returns:
+            Transcription string, or "" on error.
+        """
+        if audio.size == 0:
+            return ""
+
+        tmp_path: str | None = None
+        try:
+            import mlx_whisper
+            import soundfile as sf
+
+            # Write audio to a temporary WAV file (mlx-whisper expects a file path)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            sf.write(tmp_path, audio, sample_rate)
+
+            result = mlx_whisper.transcribe(tmp_path, path_or_hf_repo=self._config.whisper_model)
+            text = result.get("text", "") if isinstance(result, dict) else str(result)
+            return text.strip()
+        except Exception:
+            logger.exception("Whisper transcription failed")
+            return ""
+        finally:
+            if tmp_path is not None:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
+def create_stt(config: STTConfig | None = None) -> SenseVoiceSTT | WhisperSTT:
+    """Factory: return the right STT backend based on config.backend."""
+    config = config or STTConfig()
+    if config.backend == "whisper":
+        stt = WhisperSTT(config)
+        stt.load_model()
+        return stt
+    return SenseVoiceSTT(config)

@@ -13,18 +13,29 @@ Chinese native speakers in English-speaking tech environments who:
 ## Architecture
 
 ```
-Audio → SenseVoice-Small (234M, local) → Jargon Dictionary → Qwen2.5-3B (MLX, local) → Paste
-         70ms/10s audio                   0ms, fuzzy match     100ms grammar fix
+Audio → STT (SenseVoice / Whisper) → Jargon Dictionary → Filler Removal → Paste
+         ~100ms                       0ms, fuzzy match     0ms
 ```
 
-**Total latency**: ~150-300ms | **Running cost**: $0/mo (fully local)
+**Total latency**: ~100-200ms | **Running cost**: $0/mo (fully local)
 
-### Three Processing Layers
+### Processing Pipeline
 
-1. **STT**: SenseVoice-Small — best code-switching model at 234M params, 15x faster than Whisper
-2. **Jargon correction**: Phonetic fuzzy matching against user's custom dictionary (deterministic, instant)
-3. **Grammar polish**: Qwen2.5-3B via MLX — fixes grammar, resolves ambiguity, $0 cost (local)
+1. **STT**: SenseVoice-Small (Chinese-optimized) or Whisper Large-v3-turbo (accent-robust), switchable at runtime
+2. **Jargon correction**: Phonetic fuzzy matching against user's custom YAML dictionaries (deterministic, instant)
+3. **Filler removal**: Strips "um", "uh", "嗯", "额" and other filler words from both languages
+
+## Features
+
+- **Push-to-talk & toggle mode**: Hold right Cmd to record, or switch to press-to-toggle for longer dictation
+- **Bilingual jargon preservation**: English technical terms (API, Kubernetes, etc.) stay in English even in Chinese text
+- **Customizable jargon dictionaries**: Edit quant finance, tech, or learned terms via the menubar
+- **Filler word removal**: Automatically strips filler words in both English and Chinese
+- **Dual STT backends**: Switch between SenseVoice (Chinese-optimized) and Whisper (accent-robust) from the menubar
+- **Auto-learning**: Re-dictate within 30s to teach VoiceFlow new corrections
+- **Visual overlay**: Floating pill indicator shows recording/processing status
+- **Session stats**: Menubar shows dictation count for the current session
 
 ## Status
 
-Early development. See `docs/DESIGN.md` for detailed design decisions.
+Beta. See `docs/DESIGN.md` for detailed design decisions and `docs/COMPETITIVE_ANALYSIS.md` for market positioning.

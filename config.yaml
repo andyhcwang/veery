@@ -14,11 +14,6 @@
 #   model_name: "iic/SenseVoiceSmall"
 #   language: "auto"
 
-# grammar:
-#   model_name: "mlx-community/Qwen2.5-3B-Instruct-4bit"
-#   enabled: true
-#   lazy_load: true
-
 # jargon:
 #   dict_paths:
 #     - "jargon/quant_finance.yaml"
