@@ -69,7 +69,7 @@ class LearningConfig:
 
 @dataclass(frozen=True)
 class HotkeyConfig:
-    key_combo: str = "cmd+shift+space"
+    key_combo: str = "right_cmd"  # Push-to-talk: hold to record, release to process
 
 
 @dataclass(frozen=True)

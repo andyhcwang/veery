@@ -8,6 +8,7 @@ import enum
 import logging
 import subprocess
 import threading
+import time
 
 import rumps
 
@@ -18,6 +19,7 @@ from voiceflow.grammar import GrammarPolisher
 from voiceflow.jargon import JargonCorrector
 from voiceflow.learner import CorrectionLearner
 from voiceflow.output import paste_to_active_app
+from voiceflow.overlay import OverlayIndicator
 from voiceflow.stt import SenseVoiceSTT
 
 logger = logging.getLogger(__name__)
@@ -27,29 +29,6 @@ class State(enum.Enum):
     IDLE = "idle"
     RECORDING = "recording"
     PROCESSING = "processing"
-
-
-# Map config key names to pynput modifier format
-_MODIFIER_MAP: dict[str, str] = {
-    "cmd": "<cmd>",
-    "ctrl": "<ctrl>",
-    "alt": "<alt>",
-    "shift": "<shift>",
-}
-
-
-def _parse_hotkey(combo: str) -> str:
-    """Convert config hotkey string (e.g. 'cmd+shift+space') to pynput format ('<cmd>+<shift>+<space>')."""
-    parts = combo.lower().split("+")
-    converted = []
-    for part in parts:
-        part = part.strip()
-        if part in _MODIFIER_MAP:
-            converted.append(_MODIFIER_MAP[part])
-        else:
-            # Regular key — wrap in angle brackets for pynput
-            converted.append(f"<{part}>")
-    return "+".join(converted)
 
 
 def check_accessibility_permission() -> bool:
@@ -97,31 +76,36 @@ class VoiceFlowApp(rumps.App):
         self._corrector: TextCorrector | None = None
         self._learner: CorrectionLearner | None = None
         self._hotkey_listener = None
+        self._overlay = OverlayIndicator()
 
-        # Last pasted text for correction mode
+        # Last pasted text + timestamp for auto-correction detection
         self._last_pasted_text: str | None = None
+        self._last_pasted_time: float = 0.0
+        self._correction_window_sec: float = 30.0  # auto-learn if re-dictated within 30s
+
+        # Signals that recording stream is actually open and capturing audio
+        self._recording_started = threading.Event()
+
+        # Signals that all models are loaded and app is ready
+        self._ready = threading.Event()
 
         self._initialize_components()
 
+        # Heavy model loading happens in background after the event loop starts
+        threading.Thread(target=self._load_models, daemon=True).start()
+
     def _initialize_components(self) -> None:
-        """Load all pipeline components. Heavy models are loaded eagerly (VAD + STT)."""
+        """Lightweight init — create objects without loading heavy models."""
         logger.info("Initializing VoiceFlow components...")
 
-        # 1. Audio recorder (loads VAD eagerly)
+        # 1. Audio recorder (VAD loaded lazily on first recording)
         try:
             self._recorder = AudioRecorder(self._config.audio, self._config.vad)
             logger.info("AudioRecorder initialized")
         except Exception:
             logger.exception("Failed to initialize AudioRecorder")
 
-        # 2. STT (loads model eagerly)
-        try:
-            self._stt = SenseVoiceSTT(self._config.stt)
-            logger.info("SenseVoiceSTT initialized")
-        except Exception:
-            logger.exception("Failed to initialize SenseVoiceSTT")
-
-        # 3. Jargon + Grammar -> TextCorrector
+        # 2. Jargon (lightweight, no model download)
         try:
             jargon = JargonCorrector(self._config.jargon)
             grammar = GrammarPolisher(self._config.grammar)
@@ -130,7 +114,7 @@ class VoiceFlowApp(rumps.App):
         except Exception:
             logger.exception("Failed to initialize TextCorrector")
 
-        # 4. Correction learner
+        # 3. Correction learner
         if self._config.learning.enabled:
             try:
                 self._learner = CorrectionLearner(self._config.learning)
@@ -138,10 +122,10 @@ class VoiceFlowApp(rumps.App):
             except Exception:
                 logger.exception("Failed to initialize CorrectionLearner")
 
-        # 5. Global hotkey listener
+        # 4. Global hotkey listener
         self._start_hotkey_listener()
 
-        # 6. Check accessibility permission
+        # 5. Check accessibility permission
         if not check_accessibility_permission():
             logger.warning("Accessibility permission not granted. Opening System Settings...")
             subprocess.run(
@@ -149,33 +133,53 @@ class VoiceFlowApp(rumps.App):
                 check=False,
             )
 
-        logger.info("VoiceFlow initialization complete")
+        logger.info("VoiceFlow initialized (loading models in background...)")
+
+    def _load_models(self) -> None:
+        """Background thread: download/load heavy models with menubar status."""
+        try:
+            # STT model
+            self.title = "\u2b07"  # down arrow
+            self._status_item.title = "Loading STT model..."
+            self._stt = SenseVoiceSTT(self._config.stt)
+            logger.info("SenseVoiceSTT loaded")
+
+            # Grammar model
+            if self._config.grammar.enabled and self._corrector is not None:
+                self._status_item.title = "Loading grammar model..."
+                self._corrector._grammar.load()
+                logger.info("Grammar model loaded")
+
+            self.title = "\U0001f3a4"
+            self._status_item.title = "VoiceFlow \u2014 Ready"
+            self._ready.set()
+            logger.info("All models loaded — ready")
+        except Exception:
+            logger.exception("Failed to load models")
+            self.title = "\u26a0"  # warning
+            self._status_item.title = "VoiceFlow \u2014 Model load failed"
+            self._ready.set()  # unblock anyway
 
     def _start_hotkey_listener(self) -> None:
-        """Start the global hotkey listener on a daemon thread (pynput manages threading)."""
+        """Start push-to-talk listener: hold right Cmd to record, release to process."""
         try:
-            from pynput.keyboard import GlobalHotKeys
+            from pynput.keyboard import Key, Listener
 
-            hotkey_str = _parse_hotkey(self._config.hotkey.key_combo)
-            logger.info("Registering global hotkey: %s -> %s", self._config.hotkey.key_combo, hotkey_str)
+            logger.info("Registering push-to-talk key: right Cmd")
 
-            hotkeys = {hotkey_str: self._on_hotkey}
+            def on_press(key):
+                if key == Key.cmd_r:
+                    self._on_key_down()
 
-            # Register correction hotkey if learning is enabled
-            if self._config.learning.enabled:
-                correction_str = _parse_hotkey(self._config.learning.correction_hotkey)
-                logger.info(
-                    "Registering correction hotkey: %s -> %s",
-                    self._config.learning.correction_hotkey,
-                    correction_str,
-                )
-                hotkeys[correction_str] = self._on_correction_hotkey
+            def on_release(key):
+                if key == Key.cmd_r:
+                    self._on_key_up()
 
-            self._hotkey_listener = GlobalHotKeys(hotkeys)
+            self._hotkey_listener = Listener(on_press=on_press, on_release=on_release)
             self._hotkey_listener.daemon = True
             self._hotkey_listener.start()
         except Exception:
-            logger.exception("Failed to start global hotkey listener")
+            logger.exception("Failed to start hotkey listener")
 
     # ------------------------------------------------------------------
     # State management
@@ -192,94 +196,41 @@ class VoiceFlowApp(rumps.App):
         if new_state == State.IDLE:
             self.title = "\U0001f3a4"
             self._status_item.title = "VoiceFlow \u2014 Ready"
+            self._overlay.hide()
         elif new_state == State.RECORDING:
             self.title = "\U0001f534"  # red circle
             self._status_item.title = "Recording..."
+            self._overlay.show_recording()
         elif new_state == State.PROCESSING:
             self.title = "\u231b"  # hourglass
             self._status_item.title = "Processing..."
+            self._overlay.show_processing()
 
     # ------------------------------------------------------------------
     # Hotkey handler
     # ------------------------------------------------------------------
 
-    def _on_hotkey(self) -> None:
-        """Handle global hotkey press. Called from pynput thread."""
-        with self._state_lock:
-            current = self._state
-
-        if current == State.IDLE:
-            self._start_recording()
-        elif current == State.RECORDING:
-            self._cancel_recording()
-        # PROCESSING: ignore hotkey (v1 simplicity)
-
-    def _on_correction_hotkey(self) -> None:
-        """Handle correction hotkey press. Records a short correction and learns from it."""
-        if self._last_pasted_text is None:
-            logger.info("Correction hotkey pressed but no previous text to correct")
+    def _on_key_down(self) -> None:
+        """Right Cmd pressed — start recording if idle (non-blocking)."""
+        if not self._ready.is_set():
             return
-
         with self._state_lock:
             if self._state != State.IDLE:
-                logger.info("Correction hotkey ignored, not in IDLE state")
                 return
+        self._recording_started.clear()
+        threading.Thread(target=self._start_recording, daemon=True).start()
 
-        if self._recorder is None or self._stt is None or self._learner is None:
-            rumps.notification("VoiceFlow", "Error", "Components not available for correction")
-            return
-
-        self._set_state(State.RECORDING)
-        try:
-            self._recorder.start_recording()
-            worker = threading.Thread(target=self._correction_worker, daemon=True)
-            worker.start()
-        except Exception as e:
-            logger.exception("Failed to start correction recording")
-            rumps.notification("VoiceFlow", "Error", str(e))
-            self._set_state(State.IDLE)
-
-    def _correction_worker(self) -> None:
-        """Worker thread: record correction phrase, transcribe, and learn."""
-        if self._recorder is None or self._stt is None or self._learner is None:
-            self._set_state(State.IDLE)
-            return
-
-        try:
-            segment = self._recorder.wait_for_speech_end(timeout=self._config.audio.max_duration_sec)
-        except Exception:
-            logger.exception("Error waiting for correction speech end")
-            self._set_state(State.IDLE)
-            return
-
+    def _on_key_up(self) -> None:
+        """Right Cmd released — wait for recording to be ready, then stop and process."""
         with self._state_lock:
             if self._state != State.RECORDING:
                 return
-
-        if segment is None:
-            rumps.notification("VoiceFlow", "", "No correction speech detected")
-            self._set_state(State.IDLE)
-            return
-
-        self._set_state(State.PROCESSING)
-        try:
-            correction_text = self._stt.transcribe(segment.audio, segment.sample_rate)
-            if not correction_text:
-                rumps.notification("VoiceFlow", "", "Could not transcribe correction")
-                return
-
-            logger.info("Correction transcribed: %s", correction_text)
-
-            promoted = self._learner.log_correction(self._last_pasted_text, correction_text)
-            if promoted is not None:
-                rumps.notification("VoiceFlow", "Learned!", f"Will now correct to: {promoted}")
-        except Exception:
-            logger.exception("Correction processing failed")
-        finally:
-            self._set_state(State.IDLE)
+        # Wait for recording stream to actually open (handles first-time VAD load)
+        self._recording_started.wait(timeout=10)
+        self._stop_recording()
 
     def _start_recording(self) -> None:
-        """Begin a new recording session."""
+        """Begin a new recording session (push-to-talk: stream stays open until key release)."""
         if self._recorder is None:
             rumps.notification("VoiceFlow", "Error", "Audio recorder not available")
             return
@@ -287,46 +238,27 @@ class VoiceFlowApp(rumps.App):
         self._set_state(State.RECORDING)
         try:
             self._recorder.start_recording()
-            # Spawn a daemon worker thread to wait for speech end
-            worker = threading.Thread(target=self._recording_worker, daemon=True)
-            worker.start()
+            self._recording_started.set()
         except Exception as e:
             logger.exception("Failed to start recording")
+            self._recording_started.set()  # Unblock key_up even on failure
             rumps.notification("VoiceFlow", "Error", str(e))
             self._set_state(State.IDLE)
 
-    def _cancel_recording(self) -> None:
-        """Cancel the current recording (hotkey pressed during recording)."""
-        logger.info("Recording cancelled by user")
-        self._set_state(State.IDLE)
-        if self._recorder is not None:
-            self._recorder.stop_recording()  # Stops stream and signals done event
-
-    def _recording_worker(self) -> None:
-        """Worker thread: wait for VAD to detect end-of-speech, then process."""
+    def _stop_recording(self) -> None:
+        """Stop the current recording and process all captured audio."""
+        logger.info("Recording stopped by user, processing...")
         if self._recorder is None:
-            return
-
-        try:
-            segment = self._recorder.wait_for_speech_end(timeout=self._config.audio.max_duration_sec)
-        except Exception:
-            logger.exception("Error waiting for speech end")
             self._set_state(State.IDLE)
             return
-
-        # Check if we're still in RECORDING state (might have been cancelled)
-        with self._state_lock:
-            if self._state != State.RECORDING:
-                return
-
+        segment = self._recorder.stop_and_flush()
         if segment is None:
-            # No speech detected or too short -- timeout with no speech
             rumps.notification("VoiceFlow", "", "No speech detected")
             self._set_state(State.IDLE)
             return
-
-        # Speech detected, move to processing
-        self._process_segment(segment)
+        # Process on a background thread to avoid blocking the hotkey listener
+        worker = threading.Thread(target=self._process_segment, args=(segment,), daemon=True)
+        worker.start()
 
     def _process_segment(self, segment) -> None:
         """Process a captured audio segment: STT -> correct -> paste."""
@@ -344,21 +276,50 @@ class VoiceFlowApp(rumps.App):
             logger.info("Transcribed: %s", raw_text)
 
             if self._corrector is None:
-                # Fallback: paste raw text without correction
+                self._try_auto_learn(raw_text)
                 paste_to_active_app(raw_text, self._config.output)
                 self._last_pasted_text = raw_text
+                self._last_pasted_time = time.monotonic()
                 return
 
             result = self._corrector.correct(raw_text)
             logger.info("Final text: %s", result.final)
+
+            # Auto-learn: if re-dictated within window, treat as correction
+            self._try_auto_learn(result.final)
+
             paste_to_active_app(result.final, self._config.output)
             self._last_pasted_text = result.final
+            self._last_pasted_time = time.monotonic()
 
         except Exception as e:
             logger.exception("Processing failed")
             rumps.notification("VoiceFlow", "Error", str(e))
         finally:
             self._set_state(State.IDLE)
+
+    def _try_auto_learn(self, new_text: str) -> None:
+        """If the new dictation is similar to the last one, auto-learn the correction."""
+        if self._learner is None or self._last_pasted_text is None:
+            return
+        elapsed = time.monotonic() - self._last_pasted_time
+        if elapsed > self._correction_window_sec:
+            return
+
+        from rapidfuzz import fuzz
+
+        similarity = fuzz.ratio(self._last_pasted_text.lower(), new_text.lower())
+        if similarity < 40 or similarity > 95:
+            # Too different = new text, too similar = same thing repeated
+            return
+
+        logger.info(
+            "Auto-correction detected (%.0f%% similar, %.1fs ago): '%s' -> '%s'",
+            similarity, elapsed, self._last_pasted_text, new_text,
+        )
+        promoted = self._learner.log_correction(self._last_pasted_text, new_text)
+        if promoted is not None:
+            rumps.notification("VoiceFlow", "Learned!", f"Will now correct to: {promoted}")
 
     # ------------------------------------------------------------------
     # Menu callbacks

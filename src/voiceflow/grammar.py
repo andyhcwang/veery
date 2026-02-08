@@ -27,8 +27,11 @@ class GrammarPolisher:
         self._tokenizer = None
         self._loaded = False
 
-    def _ensure_loaded(self) -> bool:
-        """Load the model on first use. Returns True if model is ready."""
+    def load(self) -> bool:
+        """Download and load the model. Returns True if model is ready.
+
+        Safe to call multiple times — subsequent calls are no-ops.
+        """
         if self._loaded:
             return self._model is not None
 
@@ -61,23 +64,25 @@ class GrammarPolisher:
         if not text:
             return text
 
-        if not self._ensure_loaded():
+        if not self.load():
             return text
 
         try:
             from mlx_lm import generate
+            from mlx_lm.sample_utils import make_sampler
 
             messages = [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": text},
             ]
             prompt = self._tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            sampler = make_sampler(temp=self._config.temperature)
             result = generate(
                 self._model,
                 self._tokenizer,
                 prompt=prompt,
                 max_tokens=self._config.max_tokens,
-                temp=self._config.temperature,
+                sampler=sampler,
             )
 
             # Hallucination guard: discard if output is suspiciously long

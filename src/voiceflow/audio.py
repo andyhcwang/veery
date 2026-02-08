@@ -67,6 +67,7 @@ class AudioRecorder:
         # Recording state (protected by _lock)
         self._lock = threading.Lock()
         self._buffer: deque[np.ndarray] = deque()
+        self._raw_buffer: deque[np.ndarray] = deque()  # all audio for manual stop
         self._pre_speech_buffer: deque[np.ndarray] = deque()
         self._state = _State.WAITING
         self._speech_frames = 0
@@ -117,6 +118,7 @@ class AudioRecorder:
             # Reset state for a new recording
             max_chunks = int(self._audio_cfg.max_duration_sec * 1000 / self._audio_cfg.chunk_duration_ms)
             self._buffer = deque(maxlen=max_chunks)
+            self._raw_buffer = deque(maxlen=max_chunks)
 
             # Pre-speech buffer: ~300ms worth of chunks
             pre_speech_chunks = max(1, 300 // self._audio_cfg.chunk_duration_ms)
@@ -156,6 +158,20 @@ class AudioRecorder:
         self._done_event.set()
 
         return self._build_segment()
+
+    def stop_and_flush(self) -> AudioSegment | None:
+        """Stop recording and return all captured audio, using raw buffer as fallback.
+
+        Use this for manual stops where the user explicitly ended recording.
+        """
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+            logger.info("Recording stopped.")
+
+        self._done_event.set()
+        return self._build_segment(use_raw=True)
 
     def wait_for_speech_end(self, timeout: float | None = None) -> AudioSegment | None:
         """Block until VAD detects end of speech, then return the segment.
@@ -219,6 +235,9 @@ class AudioRecorder:
             if self._state == _State.DONE:
                 return
 
+            # Always keep raw audio for manual stop fallback
+            self._raw_buffer.append(chunk)
+
             if self._state == _State.WAITING:
                 # Accumulate pre-speech ring buffer
                 self._pre_speech_buffer.append(chunk)
@@ -256,24 +275,31 @@ class AudioRecorder:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_segment(self) -> AudioSegment | None:
+    def _build_segment(self, use_raw: bool = False) -> AudioSegment | None:
         """Assemble buffered chunks into an AudioSegment.
+
+        Args:
+            use_raw: If True, use raw buffer as fallback when VAD buffer is empty.
 
         Returns None if speech was too short or never detected.
         """
         with self._lock:
-            if not self._buffer:
+            source = self._buffer
+            if not source and use_raw:
+                source = self._raw_buffer
+            if not source:
                 logger.debug("No audio in buffer.")
                 return None
 
-            audio = np.concatenate(list(self._buffer))
+            audio = np.concatenate(list(source))
             duration_sec = len(audio) / self._audio_cfg.sample_rate
 
-            # Strip trailing silence from the segment
-            silence_samples = int(self._silence_frames * self._audio_cfg.chunk_samples)
-            if silence_samples > 0 and silence_samples < len(audio):
-                audio = audio[:-silence_samples]
-                duration_sec = len(audio) / self._audio_cfg.sample_rate
+            # Strip trailing silence from the segment (only for VAD-segmented audio)
+            if source is self._buffer:
+                silence_samples = int(self._silence_frames * self._audio_cfg.chunk_samples)
+                if silence_samples > 0 and silence_samples < len(audio):
+                    audio = audio[:-silence_samples]
+                    duration_sec = len(audio) / self._audio_cfg.sample_rate
 
             min_dur = self._vad_cfg.min_speech_duration_sec
             if duration_sec < min_dur:
