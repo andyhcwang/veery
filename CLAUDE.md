@@ -1,4 +1,4 @@
-# VoiceFlow
+# Veery
 
 ## Project Overview
 macOS menubar dictation app for bilingual (Chinese/English) professionals.
@@ -7,8 +7,8 @@ Stack: SenseVoice-Small / Whisper (STT) + Silero VAD + rapidfuzz jargon + rumps 
 ## Build & Run
 ```bash
 uv sync                          # install deps
-uv run voiceflow                 # launch menubar app
-uv run voiceflow --mine ~/code   # mine jargon from codebase
+uv run veery                 # launch menubar app
+uv run veery --mine ~/code   # mine jargon from codebase
 ```
 
 ## Test

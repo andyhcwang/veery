@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from voiceflow.config import OutputConfig
+from veery.config import OutputConfig
 
 # ---------------------------------------------------------------------------
 # paste_to_active_app — method selection
@@ -14,10 +14,10 @@ from voiceflow.config import OutputConfig
 class TestPasteMethodSelection:
     def test_empty_text_returns_immediately(self) -> None:
         with (
-            patch("voiceflow.output._type_via_cgevent") as mock_type,
-            patch("voiceflow.output._paste_via_clipboard") as mock_paste,
+            patch("veery.output._type_via_cgevent") as mock_type,
+            patch("veery.output._paste_via_clipboard") as mock_paste,
         ):
-            from voiceflow.output import paste_to_active_app
+            from veery.output import paste_to_active_app
             paste_to_active_app("")
         mock_type.assert_not_called()
         mock_paste.assert_not_called()
@@ -25,10 +25,10 @@ class TestPasteMethodSelection:
     def test_short_text_uses_cgevent(self) -> None:
         cfg = OutputConfig(cgevent_char_limit=500)
         with (
-            patch("voiceflow.output._type_via_cgevent") as mock_type,
-            patch("voiceflow.output._paste_via_clipboard") as mock_paste,
+            patch("veery.output._type_via_cgevent") as mock_type,
+            patch("veery.output._paste_via_clipboard") as mock_paste,
         ):
-            from voiceflow.output import paste_to_active_app
+            from veery.output import paste_to_active_app
             paste_to_active_app("hello", cfg)
         mock_type.assert_called_once_with("hello")
         mock_paste.assert_not_called()
@@ -36,10 +36,10 @@ class TestPasteMethodSelection:
     def test_long_text_uses_clipboard(self) -> None:
         cfg = OutputConfig(cgevent_char_limit=5)
         with (
-            patch("voiceflow.output._type_via_cgevent") as mock_type,
-            patch("voiceflow.output._paste_via_clipboard") as mock_paste,
+            patch("veery.output._type_via_cgevent") as mock_type,
+            patch("veery.output._paste_via_clipboard") as mock_paste,
         ):
-            from voiceflow.output import paste_to_active_app
+            from veery.output import paste_to_active_app
             paste_to_active_app("hello world", cfg)
         mock_type.assert_not_called()
         mock_paste.assert_called_once()
@@ -48,27 +48,27 @@ class TestPasteMethodSelection:
         """Text length == limit should use CGEvent (<=)."""
         cfg = OutputConfig(cgevent_char_limit=5)
         with (
-            patch("voiceflow.output._type_via_cgevent") as mock_type,
-            patch("voiceflow.output._paste_via_clipboard") as mock_paste,
+            patch("veery.output._type_via_cgevent") as mock_type,
+            patch("veery.output._paste_via_clipboard") as mock_paste,
         ):
-            from voiceflow.output import paste_to_active_app
+            from veery.output import paste_to_active_app
             paste_to_active_app("abcde", cfg)  # exactly 5 chars
         mock_type.assert_called_once()
         mock_paste.assert_not_called()
 
     def test_default_config_used_when_none(self) -> None:
         with (
-            patch("voiceflow.output._type_via_cgevent") as mock_type,
-            patch("voiceflow.output._paste_via_clipboard"),
+            patch("veery.output._type_via_cgevent") as mock_type,
+            patch("veery.output._paste_via_clipboard"),
         ):
-            from voiceflow.output import paste_to_active_app
+            from veery.output import paste_to_active_app
             paste_to_active_app("hi")  # no config passed
         mock_type.assert_called_once_with("hi")
 
     def test_exception_is_caught(self) -> None:
         """paste_to_active_app catches all exceptions and logs."""
-        with patch("voiceflow.output._type_via_cgevent", side_effect=RuntimeError("CGEvent fail")):
-            from voiceflow.output import paste_to_active_app
+        with patch("veery.output._type_via_cgevent", side_effect=RuntimeError("CGEvent fail")):
+            from veery.output import paste_to_active_app
             # Should not raise
             paste_to_active_app("hello")
 
@@ -82,7 +82,7 @@ class TestTypeViaCGEvent:
     def test_single_batch(self) -> None:
         mock_quartz = MagicMock()
         with patch.dict("sys.modules", {"Quartz": mock_quartz}):
-            from voiceflow.output import _type_via_cgevent
+            from veery.output import _type_via_cgevent
             _type_via_cgevent("hello")
 
         # One batch → 2 CGEventPost calls (key down + key up)
@@ -91,7 +91,7 @@ class TestTypeViaCGEvent:
     def test_multiple_batches(self) -> None:
         mock_quartz = MagicMock()
         with patch.dict("sys.modules", {"Quartz": mock_quartz}):
-            from voiceflow.output import _type_via_cgevent
+            from veery.output import _type_via_cgevent
             _type_via_cgevent("a" * 45)  # 45 chars → ceil(45/20) = 3 batches
 
         # 3 batches × 2 events each = 6
@@ -101,7 +101,7 @@ class TestTypeViaCGEvent:
         """Emoji requires surrogate pairs in UTF-16 — verify utf16_len calculation."""
         mock_quartz = MagicMock()
         with patch.dict("sys.modules", {"Quartz": mock_quartz}):
-            from voiceflow.output import _type_via_cgevent
+            from veery.output import _type_via_cgevent
             # 🎤 is a single Python char but 2 UTF-16 code units
             _type_via_cgevent("\U0001f3a4")
 
@@ -127,9 +127,9 @@ class TestPasteViaClipboard:
 
         with (
             patch.dict("sys.modules", {"Quartz": mock_quartz, "AppKit": mock_appkit}),
-            patch("voiceflow.output.time.sleep"),
+            patch("veery.output.time.sleep"),
         ):
-            from voiceflow.output import _paste_via_clipboard
+            from veery.output import _paste_via_clipboard
             _paste_via_clipboard("hello world")
 
         # Should write text to clipboard
@@ -151,9 +151,9 @@ class TestPasteViaClipboard:
 
         with (
             patch.dict("sys.modules", {"Quartz": mock_quartz, "AppKit": mock_appkit}),
-            patch("voiceflow.output.time.sleep"),
+            patch("veery.output.time.sleep"),
         ):
-            from voiceflow.output import _paste_via_clipboard
+            from veery.output import _paste_via_clipboard
             _paste_via_clipboard("new text")
 
         # clearContents called twice: once before write, once before restore

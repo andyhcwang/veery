@@ -1,15 +1,15 @@
-# VoiceFlow
+# Veery
 
 **Dictation that speaks your language. Both of them.**
 
-The only dictation app built for how bilingual Chinese/English tech professionals actually speak -- mixed-language, jargon-heavy, and running entirely on your Mac for free.
+Purpose-built for how bilingual Chinese/English tech professionals actually speak -- mixed-language, jargon-heavy, and running entirely on your Mac for free.
 
 <!-- Demo GIF placeholder: Screen recording showing mixed zh/en dictation with jargon correction -->
 
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![macOS](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-lightgrey.svg)](https://support.apple.com/en-us/116943)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Open Source](https://img.shields.io/badge/open%20source-yes-brightgreen.svg)](https://github.com/andyhcwang/voiceflow)
+[![Open Source](https://img.shields.io/badge/open%20source-yes-brightgreen.svg)](https://github.com/andyhcwang/veery)
 
 ## The Problem
 
@@ -17,7 +17,7 @@ You say "帮我review一下这个PR，看看API的latency有没有改善" and yo
 
 You've tried five dictation apps. They all fail at the same thing: **mixed-language technical speech**. You've resigned yourself to typing everything, even though dictation would be 3-5x faster.
 
-VoiceFlow was built because no one else was going to build it.
+Veery was built because no one else was going to build it.
 
 ## How It Works
 
@@ -30,9 +30,9 @@ Audio → STT → Jargon Correction → Filler Removal → Paste to active app
    or Whisper    YAML matching        "嗯", "额"
 ```
 
-- **Latency**: ~100-200ms end-to-end
+- **Latency**: Sub-second on Apple Silicon
 - **Cost**: $0/month, forever
-- **Privacy**: 100% local -- no audio data leaves your machine
+- **Privacy**: Runs entirely offline after first model download -- no audio data ever leaves your machine
 
 ## Features
 
@@ -40,53 +40,56 @@ Audio → STT → Jargon Correction → Filler Removal → Paste to active app
 - **Bilingual jargon preservation** -- English terms stay in English in Chinese text ("API", "Kubernetes", "Sharpe ratio" never get transliterated)
 - **Customizable YAML jargon dictionaries** -- fuzzy matching + phonetic matching catches STT errors like "pie torch" -> PyTorch, "duck dee bee" -> DuckDB
 - **Community jargon packs** -- Pre-built packs for AI/ML, DevOps/Cloud, and Frontend/Web (contribute your own!)
-- **Auto-learning from corrections** -- Re-dictate within 30 seconds and VoiceFlow learns the correction automatically
+- **Auto-learning from corrections** -- Re-dictate within 30 seconds and Veery learns the correction automatically
 - **Codebase jargon mining** -- Run `--mine ~/code` to scan your projects and discover terms to add
 - **Filler word removal** -- Strips "um", "uh", "嗯", "额", "那个" and other fillers in both languages
 - **Dual STT backends** -- SenseVoice-Small (Chinese-optimized, fast) and Whisper Large-v3-turbo (accent-robust), switchable at runtime from the menubar
 - **Visual overlay** -- Floating pill indicator shows recording/processing/success status
-- **Fully local, fully open source** -- No cloud, no account, no telemetry. Read every line of code.
+- **Fully local, fully open source** -- No cloud, no account, no telemetry. Models download once on first launch (~1.7GB), then everything runs offline forever. Read every line of code.
 
 ## Quick Start
 
 ### Prerequisites
 
-- macOS with Apple Silicon (M1/M2/M3/M4)
+- macOS 14+ (Sonoma) with Apple Silicon (M1/M2/M3/M4)
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/) package manager
+- PortAudio (`brew install portaudio`)
 
 ### Install
 
 ```bash
-git clone https://github.com/andyhcwang/voiceflow.git
-cd voiceflow
+git clone https://github.com/andyhcwang/veery.git
+cd veery
 bash install.sh   # checks prerequisites, installs deps
 ```
 
 Or manually:
 
 ```bash
-git clone https://github.com/andyhcwang/voiceflow.git
-cd voiceflow
+git clone https://github.com/andyhcwang/veery.git
+cd veery
 uv sync
 ```
 
 ### Run
 
 ```bash
-uv run voiceflow
+uv run veery
 ```
 
-On first launch, VoiceFlow will:
-1. Guide you through granting **Accessibility** and **Microphone** permissions
-2. Download the STT model (~200MB for SenseVoice, ~1.5GB for Whisper) with a progress bar
+On first launch, Veery will:
+1. Guide you through granting **Accessibility**, **Microphone**, and **Input Monitoring** permissions
+2. Download STT models (~200MB for SenseVoice, ~1.5GB for Whisper) with a progress bar -- you can start dictating with SenseVoice while Whisper downloads in the background
 3. Show a microphone icon in your menubar when ready
+
+> **Note:** First-time setup requires an internet connection to download models. After that, Veery works fully offline.
 
 Hold **Right Cmd**, speak in whatever mix of Chinese and English comes naturally, release, and watch the text appear.
 
 ## The Jargon System
 
-This is VoiceFlow's killer feature. STT models are trained on general speech -- they don't know your domain vocabulary. VoiceFlow fixes this with a three-layer correction system that runs in <1ms:
+This is Veery's killer feature. STT models are trained on general speech -- they don't know your domain vocabulary. Veery fixes this with a three-layer correction system that runs in <1ms:
 
 ### 1. Exact matching
 
@@ -104,7 +107,7 @@ terms:
     - sharp issue
 ```
 
-When the STT outputs "pie torch", VoiceFlow instantly corrects it to "PyTorch".
+When the STT outputs "pie torch", Veery instantly corrects it to "PyTorch".
 
 ### 2. Fuzzy matching
 
@@ -112,7 +115,7 @@ Even if the STT output doesn't exactly match a variant, fuzzy matching (via [rap
 
 ### 3. Phonetic matching
 
-For terms where the STT gets the sounds right but the spelling wrong, consonant-skeleton matching catches them. "NumPi" and "NumPy" share the same skeleton `nmp`, so VoiceFlow knows they're the same term.
+For terms where the STT gets the sounds right but the spelling wrong, consonant-skeleton matching catches them. "NumPi" and "NumPy" share the same skeleton `nmp`, so Veery knows they're the same term.
 
 ### Adding your own terms
 
@@ -139,7 +142,7 @@ jargon:
     - jargon/my_domain.yaml
 ```
 
-Or open jargon files directly from the VoiceFlow menubar under **Jargon Dictionaries**.
+Or open jargon files directly from the Veery menubar under **Jargon Dictionaries**.
 
 ### Community jargon packs
 
@@ -158,26 +161,26 @@ Want to contribute a pack for your domain? See [Contributing](#contributing).
 
 ### Mining jargon from your codebase
 
-VoiceFlow can scan your Python projects and suggest terms to add:
+Veery can scan your Python projects and suggest terms to add:
 
 ```bash
-uv run voiceflow --mine ~/code ~/projects/ml-pipeline
+uv run veery --mine ~/code ~/projects/ml-pipeline
 ```
 
 It extracts CamelCase class names, ALL_CAPS constants, and imported module names, filters out standard library, and shows you what's new vs. already in your dictionaries.
 
 ### Auto-learning
 
-When VoiceFlow gets a term wrong, just re-dictate the correction within 30 seconds. VoiceFlow detects the correction, logs it, and after 3 identical corrections, automatically promotes it to your learned dictionary (`jargon/learned.yaml`). No manual YAML editing needed.
+When Veery gets a term wrong, just re-dictate the correction within 30 seconds. Veery detects the correction, logs it, and after 3 identical corrections, automatically promotes it to your learned dictionary (`jargon/learned.yaml`). No manual YAML editing needed.
 
 ## Configuration
 
-VoiceFlow works out of the box with sensible defaults. To customize, create `config.yaml` in the project root:
+Veery works out of the box with sensible defaults. To customize, edit `config.yaml` in the project root:
 
 ```yaml
 # config.yaml
 stt:
-  backend: sensevoice      # "sensevoice" or "whisper"
+  backend: whisper          # "sensevoice" or "whisper" (default: whisper)
 
 audio:
   max_duration_sec: 30.0    # Auto-stop after 30s
@@ -187,6 +190,7 @@ vad:
   silence_duration_sec: 2.0 # Seconds of silence before auto-stop
 
 hotkey:
+  key_combo: right_cmd      # Push-to-talk key
   mode: hold                # "hold" (push-to-talk) or "toggle" (press-to-toggle)
 
 jargon:
@@ -206,18 +210,18 @@ learning:
 
 ## Comparison
 
-| | VoiceFlow | SuperWhisper | Wispr Flow | Apple Dictation |
+| | Veery | SuperWhisper | Wispr Flow | Apple Dictation |
 |---|---|---|---|---|
 | **Price** | Free forever | $8.49/mo | $10/mo | Free |
-| **Privacy** | 100% local | Mostly local | Cloud-dependent | Cloud |
+| **Privacy** | 100% local | Local | Local + cloud options | Cloud |
 | **Bilingual zh/en** | Purpose-built | Multi-lang (generic) | Multi-lang (generic) | Single language only |
-| **Jargon handling** | Fuzzy + phonetic + auto-learn | Find-and-replace | Cloud auto-learn | None |
+| **Jargon handling** | Fuzzy + phonetic + auto-learn | Find-and-replace | Auto-learn | None |
 | **Chinese STT** | SenseVoice (SOTA Chinese) | Whisper (English-first) | Proprietary | Apple ASR |
 | **Custom dictionaries** | YAML (open, editable) | Vocabulary hints | Manual add | None |
 | **Codebase mining** | Yes (`--mine`) | No | No | No |
 | **Open source** | Yes | No | No | No |
 
-VoiceFlow doesn't compete on polish or mobile support. It wins on an axis that matters to you: **it's the only tool that actually works for mixed zh/en technical speech**.
+Veery doesn't compete on polish or mobile support. It wins on the axis that matters to you: **mixed zh/en technical speech with domain jargon**.
 
 ## Contributing
 

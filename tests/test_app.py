@@ -1,4 +1,4 @@
-"""Tests for VoiceFlowApp: state machine, hotkey handling, process_segment, auto-learn."""
+"""Tests for VeeryApp: state machine, hotkey handling, process_segment, auto-learn."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from voiceflow.config import AppConfig
+from veery.config import AppConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -18,39 +18,39 @@ from voiceflow.config import AppConfig
 
 @pytest.fixture
 def app():
-    """Create a VoiceFlowApp with all heavy dependencies mocked.
+    """Create a VeeryApp with all heavy dependencies mocked.
 
     rumps is left real (it can construct MenuItems without NSApplication).
     Only ML models, audio, overlays, hotkey, and sounds are mocked.
     """
     patches = [
-        patch("voiceflow.app.AudioRecorder"),
-        patch("voiceflow.app.JargonCorrector"),
-        patch("voiceflow.app.TextCorrector"),
-        patch("voiceflow.app.CorrectionLearner"),
-        patch("voiceflow.app.OverlayIndicator"),
-        patch("voiceflow.app.PermissionGuideOverlay"),
-        patch("voiceflow.app.DownloadProgressOverlay"),
-        patch("voiceflow.app.check_permissions_granted", return_value=True),
-        patch("voiceflow.app.sounds"),
-        patch("voiceflow.app.create_stt"),
-        patch("voiceflow.app._is_model_cached", return_value=True),
-        patch("voiceflow.app._is_sensevoice_cached", return_value=True),
-        patch("voiceflow.app.ensure_model_downloaded"),
-        patch("voiceflow.app.ensure_sensevoice_downloaded"),
-        patch("voiceflow.app.paste_to_active_app"),
+        patch("veery.app.AudioRecorder"),
+        patch("veery.app.JargonCorrector"),
+        patch("veery.app.TextCorrector"),
+        patch("veery.app.CorrectionLearner"),
+        patch("veery.app.OverlayIndicator"),
+        patch("veery.app.PermissionGuideOverlay"),
+        patch("veery.app.DownloadProgressOverlay"),
+        patch("veery.app.check_permissions_granted", return_value=True),
+        patch("veery.app.sounds"),
+        patch("veery.app.create_stt"),
+        patch("veery.app._is_model_cached", return_value=True),
+        patch("veery.app._is_sensevoice_cached", return_value=True),
+        patch("veery.app.ensure_model_downloaded"),
+        patch("veery.app.ensure_sensevoice_downloaded"),
+        patch("veery.app.paste_to_active_app"),
         # Prevent real hotkey listener from starting
-        patch("voiceflow.app.VoiceFlowApp._start_hotkey_listener"),
+        patch("veery.app.VeeryApp._start_hotkey_listener"),
         # Prevent background thread for model loading — we call it synchronously
-        patch("voiceflow.app.threading.Thread"),
+        patch("veery.app.threading.Thread"),
     ]
 
     for p in patches:
         p.start()
 
-    from voiceflow.app import VoiceFlowApp
+    from veery.app import VeeryApp
 
-    vf_app = VoiceFlowApp(AppConfig())
+    vf_app = VeeryApp(AppConfig())
     # Simulate model loading complete
     vf_app._ready.set()
     # Give it a mock STT
@@ -75,30 +75,30 @@ class FakeSegment:
 
 class TestStateMachine:
     def test_initial_state_is_idle(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         assert app._state == State.IDLE
 
     def test_set_state_recording(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._set_state(State.RECORDING)
         assert app._state == State.RECORDING
         app._overlay.show_recording.assert_called_once()
 
     def test_set_state_processing(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._set_state(State.PROCESSING)
         assert app._state == State.PROCESSING
         app._overlay.show_processing.assert_called_once()
 
     def test_set_state_idle_hides_overlay(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.PROCESSING
         app._set_state(State.IDLE)
         assert app._state == State.IDLE
         app._overlay.hide.assert_called()
 
     def test_set_state_idle_skip_overlay(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._overlay.hide.reset_mock()
         app._set_state(State.IDLE, skip_overlay=True)
         app._overlay.hide.assert_not_called()
@@ -111,30 +111,30 @@ class TestStateMachine:
 
 class TestBeginRecording:
     def test_begin_recording_from_idle(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
 
         # Unpatch threading.Thread so _begin_recording can spawn its thread
-        with patch("voiceflow.app.threading.Thread") as mock_thread:
+        with patch("veery.app.threading.Thread") as mock_thread:
             mock_thread.return_value = MagicMock()
             app._begin_recording()
 
         assert app._state == State.RECORDING
 
     def test_begin_recording_noop_when_not_idle(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.RECORDING
         app._recorder.prepare_stream.reset_mock()
 
-        with patch("voiceflow.app.threading.Thread"):
+        with patch("veery.app.threading.Thread"):
             app._begin_recording()
 
         app._recorder.prepare_stream.assert_not_called()
 
     def test_begin_recording_prepare_stream_failure(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._recorder.prepare_stream.side_effect = RuntimeError("mic error")
 
-        with patch("voiceflow.app.threading.Thread"):
+        with patch("veery.app.threading.Thread"):
             app._begin_recording()
 
         assert app._state == State.IDLE
@@ -148,13 +148,13 @@ class TestBeginRecording:
 
 class TestHoldMode:
     def test_key_down_ignored_before_ready(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._ready.clear()
         app._on_key_down()
         assert app._state == State.IDLE
 
     def test_key_up_ignored_in_toggle_mode(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._recording_mode = "toggle"
         app._state = State.RECORDING
         app._on_key_up()
@@ -170,7 +170,7 @@ class TestHoldMode:
         app._recorder.stop_and_flush.assert_called_once()
 
     def test_key_up_noop_when_idle(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._recording_mode = "hold"
         app._state = State.IDLE
         app._on_key_up()
@@ -184,17 +184,17 @@ class TestHoldMode:
 
 class TestToggleMode:
     def test_toggle_starts_recording_from_idle(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._recording_mode = "toggle"
 
-        with patch("voiceflow.app.threading.Thread") as mock_thread:
+        with patch("veery.app.threading.Thread") as mock_thread:
             mock_thread.return_value = MagicMock()
             app._on_key_down()
 
         assert app._state == State.RECORDING
 
     def test_toggle_stops_recording(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._recording_mode = "toggle"
         app._state = State.RECORDING
         app._recording_started.set()
@@ -205,7 +205,7 @@ class TestToggleMode:
         app._recorder.stop_and_flush.assert_called_once()
 
     def test_toggle_noop_during_processing(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._recording_mode = "toggle"
         app._state = State.PROCESSING
         app._on_toggle_key()
@@ -220,7 +220,7 @@ class TestToggleMode:
 
 class TestStopRecording:
     def test_stop_recording_no_speech(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.RECORDING
         app._recorder.stop_and_flush.return_value = None
 
@@ -230,12 +230,12 @@ class TestStopRecording:
         assert app._state == State.IDLE
 
     def test_stop_recording_with_speech_transitions_to_processing(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.RECORDING
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
         app._recorder.stop_and_flush.return_value = seg
 
-        with patch("voiceflow.app.threading.Thread") as mock_thread:
+        with patch("veery.app.threading.Thread") as mock_thread:
             mock_instance = MagicMock()
             mock_thread.return_value = mock_instance
             app._stop_recording()
@@ -244,7 +244,7 @@ class TestStopRecording:
         mock_instance.start.assert_called_once()
 
     def test_stop_recording_no_recorder(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._recorder = None
         app._state = State.RECORDING
         app._stop_recording()
@@ -258,7 +258,7 @@ class TestStopRecording:
 
 class TestProcessSegment:
     def test_process_segment_success(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.PROCESSING
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
 
@@ -275,7 +275,7 @@ class TestProcessSegment:
         app._overlay.show_success.assert_called_once()
 
     def test_process_segment_stt_none(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.PROCESSING
         app._stt = None
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
@@ -286,7 +286,7 @@ class TestProcessSegment:
         assert app._session_count == 0
 
     def test_process_segment_empty_transcription(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.PROCESSING
         app._stt.transcribe.return_value = ""
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
@@ -298,7 +298,7 @@ class TestProcessSegment:
         assert app._session_count == 0
 
     def test_process_segment_stt_exception(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.PROCESSING
         app._stt.transcribe.side_effect = RuntimeError("STT crash")
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
@@ -310,7 +310,7 @@ class TestProcessSegment:
 
     def test_process_segment_no_corrector(self, app) -> None:
         """When corrector is None, raw text is pasted directly."""
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.PROCESSING
         app._corrector = None
         app._stt.transcribe.return_value = "raw text"
@@ -323,7 +323,7 @@ class TestProcessSegment:
 
     def test_process_segment_local_stt_reference(self, app) -> None:
         """Verify _process_segment uses a local reference to _stt."""
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.PROCESSING
 
         original_stt = MagicMock()
@@ -340,7 +340,7 @@ class TestProcessSegment:
         original_stt.transcribe.assert_called_once()
 
     def test_session_count_updates_detail(self, app) -> None:
-        from voiceflow.app import State
+        from veery.app import State
         app._state = State.PROCESSING
         app._stt.transcribe.return_value = "hello"
         mock_result = MagicMock()
@@ -443,7 +443,7 @@ class TestOnQuit:
         app._hotkey_listener = mock_listener
         app._recorder.is_recording = True
 
-        with patch("voiceflow.app.rumps"):
+        with patch("veery.app.rumps"):
             app._on_quit(None)
 
         mock_listener.stop.assert_called_once()
@@ -452,7 +452,7 @@ class TestOnQuit:
     def test_quit_no_recorder(self, app) -> None:
         app._recorder = None
         app._hotkey_listener = None
-        with patch("voiceflow.app.rumps"):
+        with patch("veery.app.rumps"):
             app._on_quit(None)  # should not crash
 
 
@@ -471,7 +471,7 @@ class TestSTTBackendSwitch:
     def test_select_different_backend(self, app) -> None:
         app._stt_backend = "sensevoice"
 
-        with patch("voiceflow.app.threading.Thread") as mock_thread:
+        with patch("veery.app.threading.Thread") as mock_thread:
             mock_instance = MagicMock()
             mock_thread.return_value = mock_instance
             app._on_select_stt_backend("whisper", None)
@@ -483,7 +483,7 @@ class TestSTTBackendSwitch:
         app._whisper_loading = True
         app._whisper_download_cancelled = False
 
-        with patch("voiceflow.app.threading.Thread") as mock_thread:
+        with patch("veery.app.threading.Thread") as mock_thread:
             mock_thread.return_value = MagicMock()
             app._on_select_stt_backend("sensevoice", None)
 

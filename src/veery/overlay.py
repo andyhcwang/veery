@@ -496,7 +496,7 @@ _TIPS_ALPHA = 0.4
 _TIPS = (
     "Your speech models run 100% locally \u2014 nothing leaves your Mac",
     "Hold Right \u2318 to dictate, release to process",
-    "VoiceFlow learns your jargon over time",
+    "Veery learns your jargon over time",
     "Supports bilingual Chinese/English dictation",
 )
 
@@ -650,11 +650,11 @@ class DownloadProgressOverlay:
 
             padding = 30
 
-            # Title label: "Setting up VoiceFlow..."
+            # Title label: "Setting up Veery..."
             title_label = _NSTextField.alloc().initWithFrame_(
                 ((padding, _DL_HEIGHT - 50), (_DL_WIDTH - 2 * padding, 24))
             )
-            title_label.setStringValue_("Setting up VoiceFlow...")
+            title_label.setStringValue_("Setting up Veery...")
             title_label.setBezeled_(False)
             title_label.setDrawsBackground_(False)
             title_label.setEditable_(False)
@@ -827,9 +827,9 @@ _MICROPHONE_URL = "x-apple.systempreferences:com.apple.preference.security?Priva
 
 _PERM_STEPS = (
     {
-        "title": "VoiceFlow needs your permission",
+        "title": "Veery needs your permission",
         "body": (
-            "VoiceFlow needs Accessibility access to type dictated\n"
+            "Veery needs Accessibility access to type dictated\n"
             "text into your apps.\n"
             "\n"
             "System Settings \u2192 Privacy & Security \u2192 Accessibility"
@@ -838,9 +838,9 @@ _PERM_STEPS = (
         "settings_url": _ACCESSIBILITY_URL,
     },
     {
-        "title": "VoiceFlow needs your permission",
+        "title": "Veery needs your permission",
         "body": (
-            "VoiceFlow needs Microphone access to hear your speech.\n"
+            "Veery needs Microphone access to hear your speech.\n"
             "\n"
             "System Settings \u2192 Privacy & Security \u2192 Microphone"
         ),
@@ -1080,7 +1080,8 @@ class PermissionGuideOverlay:
         step = _PERM_STEPS[step_index]
 
         if self._step_label is not None:
-            self._step_label.setStringValue_(step["step_label"])
+            total = len(self._pending_steps)
+            self._step_label.setStringValue_(f"Step {self._current_step + 1} of {total}")
         if self._title_label is not None:
             self._title_label.setStringValue_(step["title"])
         if self._body_label is not None:
@@ -1156,11 +1157,6 @@ class PermissionGuideOverlay:
             logger.info("All permissions already granted, skipping guide")
             on_complete()
             return
-
-        # Re-label steps based on how many are pending
-        total = len(self._pending_steps)
-        for i, step_index in enumerate(self._pending_steps):
-            _PERM_STEPS[step_index]["step_label"] = f"Step {i + 1} of {total}"
 
         self._current_step = 0
 

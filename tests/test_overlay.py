@@ -6,13 +6,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from voiceflow.overlay import OverlayIndicator
+from veery.overlay import OverlayIndicator
 
 
 @pytest.fixture(autouse=True)
 def _reset_overlay_module():
     """Reset module-level state between tests."""
-    import voiceflow.overlay as mod
+    import veery.overlay as mod
     mod._loaded = False
     mod._overlay_ref = None
     mod._PillView._PillViewClass = None
@@ -25,7 +25,7 @@ def _reset_overlay_module():
 @pytest.fixture
 def mock_appkit():
     """Patch _ensure_appkit to succeed without real AppKit."""
-    import voiceflow.overlay as mod
+    import veery.overlay as mod
 
     mod._loaded = True
     mod._NSPanel = MagicMock()
@@ -58,7 +58,7 @@ class TestOverlayIndicator:
 
     def test_init_sets_overlay_ref(self):
         """OverlayIndicator.__init__ sets module-level _overlay_ref."""
-        import voiceflow.overlay as mod
+        import veery.overlay as mod
         overlay = OverlayIndicator()
         assert mod._overlay_ref is overlay
 
@@ -73,7 +73,7 @@ class TestOverlayIndicator:
 
     def test_ensure_panel_returns_false_without_appkit(self):
         """_ensure_panel returns False when AppKit is not available."""
-        import voiceflow.overlay as mod
+        import veery.overlay as mod
         mod._loaded = False
         with patch.object(mod, "_ensure_appkit", return_value=False):
             overlay = OverlayIndicator()
@@ -85,25 +85,25 @@ class TestOverlayIndicator:
 
     def test_show_recording_dispatches_to_main(self, overlay_with_panel):
         """show_recording dispatches work to main thread via callAfter."""
-        with patch("voiceflow.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
             overlay_with_panel.show_recording()
             mock_run.assert_called_once()
 
     def test_show_processing_dispatches_to_main(self, overlay_with_panel):
         """show_processing dispatches work to main thread via callAfter."""
-        with patch("voiceflow.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
             overlay_with_panel.show_processing()
             mock_run.assert_called_once()
 
     def test_show_success_dispatches_to_main(self, overlay_with_panel):
         """show_success dispatches work to main thread via callAfter."""
-        with patch("voiceflow.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
             overlay_with_panel.show_success()
             mock_run.assert_called_once()
 
     def test_hide_dispatches_to_main(self, overlay_with_panel):
         """hide dispatches work to main thread via callAfter."""
-        with patch("voiceflow.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
             overlay_with_panel.hide()
             mock_run.assert_called_once()
 
@@ -242,7 +242,7 @@ class TestOverlayIndicator:
     def test_run_on_main_handles_import_error(self):
         """_run_on_main logs exception if callAfter import fails."""
         overlay = OverlayIndicator()
-        with patch("voiceflow.overlay.logger") as mock_logger:
+        with patch("veery.overlay.logger") as mock_logger:
             with patch.dict("sys.modules", {"PyObjCTools": None, "PyObjCTools.AppHelper": None}):
                 overlay._run_on_main(lambda: None)
             mock_logger.exception.assert_called()
@@ -255,7 +255,7 @@ class TestOverlayIndicator:
 
     def test_show_warning_dispatches_to_main(self, overlay_with_panel):
         """show_warning dispatches work to main thread via callAfter."""
-        with patch("voiceflow.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
             overlay_with_panel.show_warning("No speech detected")
             mock_run.assert_called_once()
 
@@ -302,17 +302,17 @@ class TestOverlayConstants:
     """Verify overlay design constants match spec."""
 
     def test_pill_dimensions(self):
-        from voiceflow.overlay import _PILL_HEIGHT, _PILL_RADIUS, _PILL_WIDTH
+        from veery.overlay import _PILL_HEIGHT, _PILL_RADIUS, _PILL_WIDTH
         assert _PILL_WIDTH == 180
         assert _PILL_HEIGHT == 44
         assert _PILL_RADIUS == 22
 
     def test_pill_position(self):
-        from voiceflow.overlay import _PILL_TOP_OFFSET
+        from veery.overlay import _PILL_TOP_OFFSET
         assert _PILL_TOP_OFFSET == 60
 
     def test_background_color(self):
-        from voiceflow.overlay import _BG_ALPHA, _BG_BLUE, _BG_GREEN, _BG_RED
+        from veery.overlay import _BG_ALPHA, _BG_BLUE, _BG_GREEN, _BG_RED
         assert _BG_RED == 0.08
         assert _BG_GREEN == 0.08
         assert _BG_BLUE == 0.08

@@ -17,7 +17,7 @@ import numpy as np
 import sounddevice as sd
 import torch
 
-from voiceflow.config import AudioConfig, VADConfig
+from veery.config import AudioConfig, VADConfig
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +300,14 @@ class AudioRecorder:
         with self._lock:
             source = self._buffer
             if not source and use_raw:
-                source = self._raw_buffer
+                # Manual stop: use raw buffer as fallback, but only if it
+                # contains meaningful audio (not just ambient noise).
+                raw_audio = list(self._raw_buffer)
+                if raw_audio:
+                    combined = np.concatenate(raw_audio)
+                    rms = float(np.sqrt(np.mean(combined**2)))
+                    if rms > 0.01:  # above ambient noise floor
+                        source = self._raw_buffer
             if not source:
                 logger.debug("No audio in buffer.")
                 return None

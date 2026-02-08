@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from voiceflow.config import STTConfig
+from veery.config import STTConfig
 
 # ---------------------------------------------------------------------------
 # WhisperSTT
@@ -16,7 +16,7 @@ from voiceflow.config import STTConfig
 class TestWhisperSTT:
     def test_transcribe_success(self) -> None:
         """Mock mlx_whisper.transcribe, verify WhisperSTT returns cleaned text."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         audio = np.random.randn(16000).astype(np.float32)
@@ -27,8 +27,8 @@ class TestWhisperSTT:
 
         with (
             patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
-            patch("voiceflow.stt.mlx_whisper", mock_mlx, create=True),
-            patch("voiceflow.stt.sf", mock_sf, create=True),
+            patch("veery.stt.mlx_whisper", mock_mlx, create=True),
+            patch("veery.stt.sf", mock_sf, create=True),
         ):
             result = stt.transcribe(audio, 16000)
 
@@ -38,7 +38,7 @@ class TestWhisperSTT:
 
     def test_transcribe_empty_audio(self) -> None:
         """Empty audio array returns ''."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         result = stt.transcribe(np.array([], dtype=np.float32), 16000)
@@ -46,7 +46,7 @@ class TestWhisperSTT:
 
     def test_transcribe_exception_returns_empty(self) -> None:
         """When mlx_whisper.transcribe raises, WhisperSTT returns ''."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         audio = np.random.randn(16000).astype(np.float32)
@@ -57,8 +57,8 @@ class TestWhisperSTT:
 
         with (
             patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
-            patch("voiceflow.stt.mlx_whisper", mock_mlx, create=True),
-            patch("voiceflow.stt.sf", mock_sf, create=True),
+            patch("veery.stt.mlx_whisper", mock_mlx, create=True),
+            patch("veery.stt.sf", mock_sf, create=True),
         ):
             result = stt.transcribe(audio, 16000)
 
@@ -66,7 +66,7 @@ class TestWhisperSTT:
 
     def test_transcribe_temp_file_reused(self, tmp_path) -> None:
         """Verify the same pre-allocated temp wav path is reused across calls."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         audio = np.random.randn(16000).astype(np.float32)
@@ -91,7 +91,7 @@ class TestWhisperSTT:
 
     def test_transcribe_temp_file_survives_error(self) -> None:
         """Temp file persists for reuse even when transcription raises."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         audio = np.random.randn(16000).astype(np.float32)
@@ -117,7 +117,7 @@ class TestWhisperSTT:
 
     def test_load_model_warmup(self) -> None:
         """load_model() transcribes a silent wav to warm up, sets _loaded."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         assert not stt._loaded
@@ -128,8 +128,8 @@ class TestWhisperSTT:
 
         with (
             patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
-            patch("voiceflow.stt.mlx_whisper", mock_mlx, create=True),
-            patch("voiceflow.stt.sf", mock_sf, create=True),
+            patch("veery.stt.mlx_whisper", mock_mlx, create=True),
+            patch("veery.stt.sf", mock_sf, create=True),
         ):
             stt.load_model()
 
@@ -141,20 +141,20 @@ class TestWhisperSTT:
 
     def test_load_model_already_loaded_skips(self) -> None:
         """Second load_model() call is a no-op."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         stt._loaded = True
 
         mock_mlx = MagicMock()
-        with patch("voiceflow.stt.mlx_whisper", mock_mlx, create=True):
+        with patch("veery.stt.mlx_whisper", mock_mlx, create=True):
             stt.load_model()
 
         mock_mlx.transcribe.assert_not_called()
 
     def test_load_model_exception_keeps_unloaded(self) -> None:
         """If warmup fails, _loaded stays False."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
 
@@ -164,8 +164,8 @@ class TestWhisperSTT:
 
         with (
             patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
-            patch("voiceflow.stt.mlx_whisper", mock_mlx, create=True),
-            patch("voiceflow.stt.sf", mock_sf, create=True),
+            patch("veery.stt.mlx_whisper", mock_mlx, create=True),
+            patch("veery.stt.sf", mock_sf, create=True),
         ):
             stt.load_model()
 
@@ -173,7 +173,7 @@ class TestWhisperSTT:
 
     def test_transcribe_result_not_dict(self) -> None:
         """If mlx_whisper returns a non-dict, fallback to str()."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         audio = np.random.randn(16000).astype(np.float32)
@@ -184,8 +184,8 @@ class TestWhisperSTT:
 
         with (
             patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
-            patch("voiceflow.stt.mlx_whisper", mock_mlx, create=True),
-            patch("voiceflow.stt.sf", mock_sf, create=True),
+            patch("veery.stt.mlx_whisper", mock_mlx, create=True),
+            patch("veery.stt.sf", mock_sf, create=True),
         ):
             result = stt.transcribe(audio, 16000)
 
@@ -193,7 +193,7 @@ class TestWhisperSTT:
 
     def test_default_config(self) -> None:
         """WhisperSTT with no config uses STTConfig defaults."""
-        from voiceflow.stt import WhisperSTT
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT()
         assert stt._config.backend == "whisper"
@@ -208,16 +208,16 @@ class TestWhisperSTT:
 class TestCreateSTT:
     def test_create_stt_sensevoice(self) -> None:
         """backend='sensevoice' returns SenseVoiceSTT."""
-        from voiceflow.stt import SenseVoiceSTT, create_stt
+        from veery.stt import SenseVoiceSTT, create_stt
 
-        with patch("voiceflow.stt.SenseVoiceSTT._load_model"):
+        with patch("veery.stt.SenseVoiceSTT._load_model"):
             stt = create_stt(STTConfig(backend="sensevoice"))
 
         assert isinstance(stt, SenseVoiceSTT)
 
     def test_create_stt_whisper(self) -> None:
         """backend='whisper' returns WhisperSTT with load_model called."""
-        from voiceflow.stt import WhisperSTT, create_stt
+        from veery.stt import WhisperSTT, create_stt
 
         mock_sf = MagicMock()
         mock_mlx = MagicMock()
@@ -225,8 +225,8 @@ class TestCreateSTT:
 
         with (
             patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
-            patch("voiceflow.stt.mlx_whisper", mock_mlx, create=True),
-            patch("voiceflow.stt.sf", mock_sf, create=True),
+            patch("veery.stt.mlx_whisper", mock_mlx, create=True),
+            patch("veery.stt.sf", mock_sf, create=True),
         ):
             stt = create_stt(STTConfig(backend="whisper"))
 
@@ -235,18 +235,18 @@ class TestCreateSTT:
 
     def test_create_stt_default_is_whisper(self) -> None:
         """Default config creates WhisperSTT."""
-        from voiceflow.stt import WhisperSTT, create_stt
+        from veery.stt import WhisperSTT, create_stt
 
-        with patch("voiceflow.stt.WhisperSTT.load_model"):
+        with patch("veery.stt.WhisperSTT.load_model"):
             stt = create_stt()
 
         assert isinstance(stt, WhisperSTT)
 
     def test_create_stt_invalid_backend_returns_sensevoice(self) -> None:
         """Unknown backend falls through to SenseVoiceSTT (current behavior)."""
-        from voiceflow.stt import SenseVoiceSTT, create_stt
+        from veery.stt import SenseVoiceSTT, create_stt
 
-        with patch("voiceflow.stt.SenseVoiceSTT._load_model"):
+        with patch("veery.stt.SenseVoiceSTT._load_model"):
             stt = create_stt(STTConfig(backend="nonexistent"))
 
         assert isinstance(stt, SenseVoiceSTT)
@@ -285,27 +285,27 @@ class TestSTTConfigDefaults:
 class TestSenseVoiceCacheCheck:
     def test_is_sensevoice_cached_exists(self, tmp_path) -> None:
         """Returns True when model.pt exists at expected cache path."""
-        from voiceflow.stt import _is_sensevoice_cached
+        from veery.stt import _is_sensevoice_cached
 
         model_dir = tmp_path / ".cache" / "modelscope" / "hub" / "models" / "iic" / "SenseVoiceSmall"
         model_dir.mkdir(parents=True)
         (model_dir / "model.pt").touch()
 
-        with patch("voiceflow.stt.Path.home", return_value=tmp_path):
+        with patch("veery.stt.Path.home", return_value=tmp_path):
             assert _is_sensevoice_cached("iic/SenseVoiceSmall") is True
 
     def test_is_sensevoice_cached_not_exists(self, tmp_path) -> None:
         """Returns False when model.pt does not exist."""
-        from voiceflow.stt import _is_sensevoice_cached
+        from veery.stt import _is_sensevoice_cached
 
-        with patch("voiceflow.stt.Path.home", return_value=tmp_path):
+        with patch("veery.stt.Path.home", return_value=tmp_path):
             assert _is_sensevoice_cached("iic/SenseVoiceSmall") is False
 
     def test_is_sensevoice_cached_exception(self) -> None:
         """Returns False when Path.home() raises an exception."""
-        from voiceflow.stt import _is_sensevoice_cached
+        from veery.stt import _is_sensevoice_cached
 
-        with patch("voiceflow.stt.Path.home", side_effect=RuntimeError("no home")):
+        with patch("veery.stt.Path.home", side_effect=RuntimeError("no home")):
             assert _is_sensevoice_cached("iic/SenseVoiceSmall") is False
 
 
@@ -317,11 +317,11 @@ class TestSenseVoiceCacheCheck:
 class TestEnsureSenseVoiceDownloaded:
     def test_already_cached_skips_download(self) -> None:
         """When model is cached, snapshot_download is NOT called."""
-        from voiceflow.stt import ensure_sensevoice_downloaded
+        from veery.stt import ensure_sensevoice_downloaded
 
         mock_snapshot = MagicMock()
         with (
-            patch("voiceflow.stt._is_sensevoice_cached", return_value=True),
+            patch("veery.stt._is_sensevoice_cached", return_value=True),
             patch.dict("sys.modules", {"modelscope.hub.snapshot_download": MagicMock(snapshot_download=mock_snapshot)}),
         ):
             ensure_sensevoice_downloaded("iic/SenseVoiceSmall")
@@ -330,14 +330,14 @@ class TestEnsureSenseVoiceDownloaded:
 
     def test_not_cached_calls_snapshot_download(self) -> None:
         """When model is NOT cached, snapshot_download is called with model name."""
-        from voiceflow.stt import ensure_sensevoice_downloaded
+        from veery.stt import ensure_sensevoice_downloaded
 
         mock_snapshot = MagicMock()
         mock_ms_module = MagicMock()
         mock_ms_module.snapshot_download = mock_snapshot
 
         with (
-            patch("voiceflow.stt._is_sensevoice_cached", return_value=False),
+            patch("veery.stt._is_sensevoice_cached", return_value=False),
             patch.dict("sys.modules", {
                 "modelscope": MagicMock(),
                 "modelscope.hub": MagicMock(),

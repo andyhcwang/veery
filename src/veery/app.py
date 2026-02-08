@@ -1,4 +1,4 @@
-"""VoiceFlow menubar application. Orchestrates audio capture, STT, and text correction."""
+"""Veery menubar application. Orchestrates audio capture, STT, and text correction."""
 
 from __future__ import annotations
 
@@ -12,20 +12,20 @@ import webbrowser
 
 import rumps
 
-from voiceflow import __version__, sounds
-from voiceflow.audio import AudioRecorder
-from voiceflow.config import PROJECT_ROOT, STT_BACKENDS, AppConfig, load_config
-from voiceflow.corrector import TextCorrector
-from voiceflow.jargon import JargonCorrector
-from voiceflow.learner import CorrectionLearner
-from voiceflow.output import paste_to_active_app
-from voiceflow.overlay import (
+from veery import __version__, sounds
+from veery.audio import AudioRecorder
+from veery.config import PROJECT_ROOT, STT_BACKENDS, AppConfig, load_config
+from veery.corrector import TextCorrector
+from veery.jargon import JargonCorrector
+from veery.learner import CorrectionLearner
+from veery.output import paste_to_active_app
+from veery.overlay import (
     DownloadProgressOverlay,
     OverlayIndicator,
     PermissionGuideOverlay,
     check_permissions_granted,
 )
-from voiceflow.stt import (
+from veery.stt import (
     SenseVoiceSTT,
     WhisperSTT,
     _is_model_cached,
@@ -44,14 +44,14 @@ class State(enum.Enum):
     PROCESSING = "processing"
 
 
-class VoiceFlowApp(rumps.App):
+class VeeryApp(rumps.App):
     """macOS menubar app for bilingual dictation with jargon correction."""
 
     def __init__(self, config: AppConfig | None = None) -> None:
         self._config = config or load_config()
 
         super().__init__(
-            name="VoiceFlow",
+            name="Veery",
             title="\U0001f3a4",  # microphone emoji
             quit_button=None,  # We add our own quit to control ordering
         )
@@ -61,7 +61,7 @@ class VoiceFlowApp(rumps.App):
         self._state_lock = threading.Lock()
 
         # Menu items
-        self._status_item = rumps.MenuItem(f"VoiceFlow v{__version__}", callback=None)
+        self._status_item = rumps.MenuItem(f"Veery v{__version__}", callback=None)
         self._status_item.set_callback(None)
 
         # Status detail (shows model state or last action)
@@ -101,9 +101,9 @@ class VoiceFlowApp(rumps.App):
             None,  # separator
             self._edit_jargon_menu,
             None,  # separator
-            rumps.MenuItem("About VoiceFlow", callback=self._on_about),
+            rumps.MenuItem("About Veery", callback=self._on_about),
             None,  # separator
-            rumps.MenuItem("Quit VoiceFlow", callback=self._on_quit),
+            rumps.MenuItem("Quit Veery", callback=self._on_quit),
         ]
 
         # Track stats
@@ -138,7 +138,7 @@ class VoiceFlowApp(rumps.App):
 
     def _initialize_components(self) -> None:
         """Lightweight init — create objects without loading heavy models."""
-        logger.info("Initializing VoiceFlow components...")
+        logger.info("Initializing Veery components...")
 
         # 1. Audio recorder (VAD loaded lazily on first recording)
         try:
@@ -175,7 +175,7 @@ class VoiceFlowApp(rumps.App):
             self._detail_item.title = "Waiting for permissions..."
             self._permission_overlay.show(on_complete=self._on_permissions_granted)
 
-        logger.info("VoiceFlow initialized")
+        logger.info("Veery initialized")
 
     def _on_permissions_granted(self) -> None:
         """Called when all permissions are granted (from PermissionGuideOverlay)."""
@@ -403,6 +403,10 @@ class VoiceFlowApp(rumps.App):
         if not self._ready.is_set():
             return
 
+        if self._stt is None:
+            self._overlay.show_warning("Models loading...")
+            return
+
         if self._recording_mode == "toggle":
             self._on_toggle_key()
         else:
@@ -466,7 +470,7 @@ class VoiceFlowApp(rumps.App):
     def _start_recording(self) -> None:
         """Finalize recording setup (state is already RECORDING, stream may already be open)."""
         if self._recorder is None:
-            rumps.notification("VoiceFlow", "Error", "Audio recorder not available")
+            rumps.notification("Veery", "Error", "Audio recorder not available")
             self._recording_started.set()
             self._set_state(State.IDLE)
             return
@@ -477,7 +481,7 @@ class VoiceFlowApp(rumps.App):
         except Exception as e:
             logger.exception("Failed to start recording")
             self._recording_started.set()  # Unblock key_up even on failure
-            rumps.notification("VoiceFlow", "Error", str(e))
+            rumps.notification("Veery", "Error", str(e))
             self._set_state(State.IDLE)
 
     def _stop_recording(self) -> None:
@@ -509,7 +513,7 @@ class VoiceFlowApp(rumps.App):
         try:
             stt = self._stt
             if stt is None:
-                rumps.notification("VoiceFlow", "Error", "STT model not available")
+                rumps.notification("Veery", "Error", "STT model not available")
                 return
 
             raw_text = stt.transcribe(segment.audio, segment.sample_rate)
@@ -542,7 +546,7 @@ class VoiceFlowApp(rumps.App):
 
         except Exception as e:
             logger.exception("Processing failed")
-            rumps.notification("VoiceFlow", "Error", str(e))
+            rumps.notification("Veery", "Error", str(e))
         finally:
             if success:
                 sounds.play_success()
@@ -573,7 +577,7 @@ class VoiceFlowApp(rumps.App):
         )
         promoted = self._learner.log_correction(self._last_pasted_text, new_text)
         if promoted is not None:
-            rumps.notification("VoiceFlow", "Learned!", f"Will now correct to: {promoted}")
+            rumps.notification("Veery", "Learned!", f"Will now correct to: {promoted}")
 
     # ------------------------------------------------------------------
     # Menu callbacks
@@ -652,18 +656,18 @@ class VoiceFlowApp(rumps.App):
         if path.exists():
             subprocess.run(["open", str(path)], check=False)
         else:
-            rumps.notification("VoiceFlow", "", f"Jargon file not found: {path}")
+            rumps.notification("Veery", "", f"Jargon file not found: {path}")
 
     def _on_about(self, _sender) -> None:
         """Show About dialog."""
         from AppKit import NSAlert, NSInformationalAlertStyle
 
         alert = NSAlert.alloc().init()
-        alert.setMessageText_(f"VoiceFlow v{__version__}")
+        alert.setMessageText_(f"Veery v{__version__}")
         alert.setInformativeText_(
             "macOS bilingual dictation for EN/ZH professionals.\n\n"
             "Author: Andy Wang\n"
-            "GitHub: github.com/andyhcwang/voiceflow\n"
+            "GitHub: github.com/andyhcwang/veery\n"
             "X: x.com/AndyThinkMode"
         )
         alert.setAlertStyle_(NSInformationalAlertStyle)
@@ -673,7 +677,7 @@ class VoiceFlowApp(rumps.App):
 
         response = alert.runModal()
         if response == 1001:  # Open GitHub
-            webbrowser.open("https://github.com/andyhcwang/voiceflow")
+            webbrowser.open("https://github.com/andyhcwang/veery")
         elif response == 1002:  # Open X
             webbrowser.open("https://x.com/AndyThinkMode")
 
@@ -687,11 +691,11 @@ class VoiceFlowApp(rumps.App):
 
 
 def main() -> None:
-    """Entry point for `uv run voiceflow`."""
+    """Entry point for `uv run veery`."""
     import argparse
     from pathlib import Path
 
-    parser = argparse.ArgumentParser(description="VoiceFlow bilingual dictation")
+    parser = argparse.ArgumentParser(description="Veery bilingual dictation")
     parser.add_argument("--mine", nargs="+", metavar="PATH",
                         help="Scan paths for potential jargon terms")
     parser.add_argument("--mine-output", metavar="PATH", default="jargon/mined.yaml",
@@ -701,7 +705,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     if args.mine:
-        from voiceflow.miner import mine_terms, print_mining_report, write_mined_yaml
+        from veery.miner import mine_terms, print_mining_report, write_mined_yaml
         scan_paths = [Path(p).expanduser().resolve() for p in args.mine]
         output_path = Path(args.mine_output)
         results = mine_terms(scan_paths)
@@ -709,7 +713,7 @@ def main() -> None:
         print_mining_report(results, written_count=written_count, output_path=output_path)
         return
 
-    app = VoiceFlowApp()
+    app = VeeryApp()
     app.run()
 
 

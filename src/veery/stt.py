@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from voiceflow.config import STTConfig
+from veery.config import STTConfig
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +270,15 @@ class WhisperSTT:
         _f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         self._tmp_wav: str = _f.name
         _f.close()
+        import atexit
+        atexit.register(self._cleanup)
+
+    def _cleanup(self) -> None:
+        """Remove the temporary WAV file."""
+        try:
+            Path(self._tmp_wav).unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def load_model(self) -> None:
         """Warm up the Whisper model by running a dummy transcription.

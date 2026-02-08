@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from voiceflow.config import JargonConfig
-from voiceflow.jargon import JargonCorrector, JargonDictionary, _consonant_skeleton
+from veery.config import JargonConfig
+from veery.jargon import JargonCorrector, JargonDictionary, _consonant_skeleton
 
 # ---------------------------------------------------------------------------
 # Consonant skeleton tests

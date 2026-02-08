@@ -6,8 +6,8 @@ from pathlib import Path
 
 import yaml
 
-from voiceflow.config import LearningConfig
-from voiceflow.learner import CorrectionLearner
+from veery.config import LearningConfig
+from veery.learner import CorrectionLearner
 
 
 def _make_config(tmp_path: Path, **overrides) -> LearningConfig:

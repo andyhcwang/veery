@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 
-from voiceflow.config import OutputConfig
+from veery.config import OutputConfig
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,6 @@ def _type_via_cgevent(text: str) -> None:
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_down)
 
         event_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
-        Quartz.CGEventKeyboardSetUnicodeString(event_up, utf16_len, batch)
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_up)
 
 

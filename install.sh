@@ -11,7 +11,7 @@ BOLD='\033[1m'
 
 # Header
 echo ""
-echo -e "${BOLD}VoiceFlow Installer${NC}"
+echo -e "${BOLD}Veery Installer${NC}"
 echo "Bilingual dictation for macOS"
 echo "──────────────────────────────"
 echo ""
@@ -33,15 +33,15 @@ ask() {
 
 # 1. Check macOS
 if [[ "$(uname)" != "Darwin" ]]; then
-    fail "VoiceFlow only runs on macOS. Detected: $(uname)"
+    fail "Veery only runs on macOS. Detected: $(uname)"
 fi
 ok "macOS detected ($(sw_vers -productVersion), $(uname -m))"
 
-# 2. Check we're in the voiceflow directory
-if [[ ! -f "pyproject.toml" ]] || ! grep -q "voiceflow" pyproject.toml 2>/dev/null; then
-    fail "Please run this script from the voiceflow project directory.\n       cd /path/to/voiceflow && bash install.sh"
+# 2. Check we're in the veery directory
+if [[ ! -f "pyproject.toml" ]] || ! grep -q "veery" pyproject.toml 2>/dev/null; then
+    fail "Please run this script from the veery project directory.\n       cd /path/to/veery && bash install.sh"
 fi
-ok "Running from voiceflow project directory"
+ok "Running from veery project directory"
 
 # 3. Check/install Homebrew
 if command -v brew &>/dev/null; then
@@ -120,23 +120,37 @@ else
     fi
 fi
 
-# 6. Install dependencies
-info "Installing VoiceFlow dependencies..."
+# 6. Check/install PortAudio (required by sounddevice)
+if brew list portaudio &>/dev/null; then
+    ok "PortAudio found"
+else
+    warn "PortAudio is not installed (required for audio capture)."
+    if ask "Install PortAudio via Homebrew?"; then
+        info "Installing PortAudio..."
+        brew install portaudio
+        ok "PortAudio installed"
+    else
+        fail "PortAudio is required for audio capture. Install it manually:\n       brew install portaudio"
+    fi
+fi
+
+# 7. Install dependencies
+info "Installing Veery dependencies..."
 uv sync
 ok "Dependencies installed"
 
-# 7. Success message
+# 8. Success message
 echo ""
 echo -e "${GREEN}──────────────────────────────${NC}"
-echo -e "${GREEN}${BOLD}VoiceFlow installed successfully!${NC}"
+echo -e "${GREEN}${BOLD}Veery installed successfully!${NC}"
 echo -e "${GREEN}──────────────────────────────${NC}"
 echo ""
-echo "To start VoiceFlow:"
-echo -e "  ${BOLD}uv run voiceflow${NC}"
+echo "To start Veery:"
+echo -e "  ${BOLD}uv run veery${NC}"
 echo ""
 echo "To mine jargon from your codebase:"
-echo -e "  ${BOLD}uv run voiceflow --mine ~/code${NC}"
+echo -e "  ${BOLD}uv run veery --mine ~/code${NC}"
 echo ""
-echo "On first launch, VoiceFlow will guide you through granting"
+echo "On first launch, Veery will guide you through granting"
 echo "Accessibility and Microphone permissions."
 echo ""

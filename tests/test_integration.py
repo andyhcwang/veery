@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from voiceflow.config import (
+from veery.config import (
     PROJECT_ROOT,
     AppConfig,
     AudioConfig,
@@ -19,9 +19,9 @@ from voiceflow.config import (
     VADConfig,
     load_config,
 )
-from voiceflow.corrector import TextCorrector
-from voiceflow.jargon import JargonCorrector
-from voiceflow.stt import _extract_text, _strip_tags
+from veery.corrector import TextCorrector
+from veery.jargon import JargonCorrector
+from veery.stt import _extract_text, _strip_tags
 
 QUANT_DICT = str(PROJECT_ROOT / "jargon" / "quant_finance.yaml")
 TECH_DICT = str(PROJECT_ROOT / "jargon" / "tech.yaml")
@@ -63,7 +63,7 @@ class TestFullPipelineHappyPath:
 
     def test_full_pipeline_with_mock_audio_and_stt(self, text_corrector: TextCorrector) -> None:
         """End-to-end: fake audio segment -> mock STT transcribe -> corrector -> output."""
-        from voiceflow.audio import AudioSegment
+        from veery.audio import AudioSegment
 
         fake_segment = AudioSegment(
             audio=np.zeros(16000, dtype=np.float32),
@@ -97,7 +97,7 @@ class TestPipelineSTTEmpty:
         assert result.final == ""
 
     def test_app_process_segment_empty_stt(self) -> None:
-        """Simulate VoiceFlowApp._process_segment when STT returns empty string.
+        """Simulate VeeryApp._process_segment when STT returns empty string.
         The app checks `if not raw_text:` and shows a notification instead of outputting."""
         mock_stt = MagicMock()
         mock_stt.transcribe.return_value = ""
@@ -123,10 +123,10 @@ class TestPipelineSTTFails:
 
     def test_real_stt_transcribe_handles_internal_errors(self) -> None:
         """SenseVoiceSTT.transcribe() catches exceptions and returns '' gracefully."""
-        from voiceflow.stt import SenseVoiceSTT
+        from veery.stt import SenseVoiceSTT
 
         # Create STT with a mock model that raises during generate()
-        with patch("voiceflow.stt.SenseVoiceSTT._load_model"):
+        with patch("veery.stt.SenseVoiceSTT._load_model"):
             stt = SenseVoiceSTT(STTConfig())
             stt._model = MagicMock()
             stt._model.generate.side_effect = RuntimeError("inference failure")
@@ -136,9 +136,9 @@ class TestPipelineSTTFails:
 
     def test_stt_with_no_model_returns_empty(self) -> None:
         """If model failed to load (_model is None), transcribe returns ''."""
-        from voiceflow.stt import SenseVoiceSTT
+        from veery.stt import SenseVoiceSTT
 
-        with patch("voiceflow.stt.SenseVoiceSTT._load_model"):
+        with patch("veery.stt.SenseVoiceSTT._load_model"):
             stt = SenseVoiceSTT(STTConfig())
             stt._model = None
 
@@ -190,7 +190,7 @@ class TestConfigLoadsDefaults:
         assert config.stt.whisper_model == "mlx-community/whisper-large-v3-turbo"
 
         assert isinstance(config.jargon, JargonConfig)
-        assert len(config.jargon.dict_paths) == 3
+        assert len(config.jargon.dict_paths) == 2
 
         assert isinstance(config.output, OutputConfig)
         assert config.output.cgevent_char_limit == 500

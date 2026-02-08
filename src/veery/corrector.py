@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from voiceflow.jargon import JargonCorrector
+from veery.jargon import JargonCorrector
 
 logger = logging.getLogger(__name__)
 

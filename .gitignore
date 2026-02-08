@@ -25,3 +25,12 @@ build/
 .env
 *.pem
 credentials.json
+
+# Logs
+*.log
+
+# Internal docs (not for public consumption)
+docs/
+
+# Auto-generated jargon (user-specific)
+jargon/mined.yaml

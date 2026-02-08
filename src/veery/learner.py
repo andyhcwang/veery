@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 from rapidfuzz import fuzz
 
-from voiceflow.config import PROJECT_ROOT, LearningConfig
+from veery.config import PROJECT_ROOT, LearningConfig
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class CorrectionLearner:
     """Learns jargon corrections from user-initiated correction mode.
 
-    After VoiceFlow pastes text, the user can press a correction hotkey to
+    After Veery pastes text, the user can press a correction hotkey to
     re-dictate a correction. The learner computes the diff and tracks
     (variant -> canonical) pairs. After `promotion_threshold` identical
     corrections, the pair is auto-added to learned.yaml.
@@ -55,7 +55,7 @@ class CorrectionLearner:
         matches the correction_phrase, then records the (old -> new) pair.
 
         Args:
-            original_full: The full text that VoiceFlow pasted.
+            original_full: The full text that Veery pasted.
             correction_phrase: The user's re-dictated correction (short phrase).
 
         Returns:

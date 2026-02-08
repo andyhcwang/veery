@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from voiceflow.config import PROJECT_ROOT, JargonConfig
-from voiceflow.corrector import TextCorrector, remove_fillers
-from voiceflow.jargon import JargonCorrector
+from veery.config import PROJECT_ROOT, JargonConfig
+from veery.corrector import TextCorrector, remove_fillers
+from veery.jargon import JargonCorrector
 
 QUANT_DICT = str(PROJECT_ROOT / "jargon" / "quant_finance.yaml")
 TECH_DICT = str(PROJECT_ROOT / "jargon" / "tech.yaml")

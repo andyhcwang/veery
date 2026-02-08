@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from voiceflow.config import PROJECT_ROOT, JargonConfig
-from voiceflow.jargon import JargonCorrector, JargonDictionary
+from veery.config import PROJECT_ROOT, JargonConfig
+from veery.jargon import JargonCorrector, JargonDictionary
 
 QUANT_DICT = str(PROJECT_ROOT / "jargon" / "quant_finance.yaml")
 TECH_DICT = str(PROJECT_ROOT / "jargon" / "tech.yaml")

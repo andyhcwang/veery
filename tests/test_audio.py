@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from voiceflow.audio import AudioRecorder, AudioSegment, _State
-from voiceflow.config import AudioConfig, VADConfig
+from veery.audio import AudioRecorder, AudioSegment, _State
+from veery.config import AudioConfig, VADConfig
 
 
 def _make_recorder(
@@ -17,7 +17,7 @@ def _make_recorder(
     """Create an AudioRecorder with mocked sounddevice to avoid real mic access."""
     a = audio_cfg or AudioConfig()
     v = vad_cfg or VADConfig()
-    with patch("voiceflow.audio.sd"):
+    with patch("veery.audio.sd"):
         recorder = AudioRecorder(a, v)
     return recorder
 
@@ -168,7 +168,7 @@ class TestPreSpeechBuffer:
         assert rec._pre_speech_buffer.maxlen is None or True  # initial deque
 
         # After prepare_stream, maxlen is set
-        with patch("voiceflow.audio.sd") as mock_sd:
+        with patch("veery.audio.sd") as mock_sd:
             mock_sd.InputStream = MagicMock()
             rec.prepare_stream()
 
@@ -240,13 +240,23 @@ class TestBuildSegment:
         vad_cfg = VADConfig(min_speech_duration_sec=0.05)
         rec = _make_recorder(vad_cfg=vad_cfg)
 
-        # Main buffer empty, raw buffer has data
-        rec._raw_buffer.append(np.zeros(16000, dtype=np.float32))
+        # Main buffer empty, raw buffer has speech-level audio
+        rec._raw_buffer.append(np.full(16000, 0.1, dtype=np.float32))
+        rec._state = _State.SPEECH_DETECTED
         assert rec._build_segment(use_raw=False) is None
 
         seg = rec._build_segment(use_raw=True)
         assert seg is not None
         assert seg.duration_sec == 1.0
+
+    def test_build_segment_use_raw_ambient_noise_returns_none(self) -> None:
+        """Raw fallback should return None if audio is just ambient noise (low energy)."""
+        vad_cfg = VADConfig(min_speech_duration_sec=0.05)
+        rec = _make_recorder(vad_cfg=vad_cfg)
+
+        # Raw buffer has very quiet audio (ambient noise below threshold)
+        rec._raw_buffer.append(np.full(16000, 0.001, dtype=np.float32))
+        assert rec._build_segment(use_raw=True) is None
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +267,7 @@ class TestBuildSegment:
 class TestStreamLifecycle:
     def test_prepare_stream_opens_stream(self) -> None:
         rec = _make_recorder()
-        with patch("voiceflow.audio.sd") as mock_sd:
+        with patch("veery.audio.sd") as mock_sd:
             mock_stream = MagicMock()
             mock_sd.InputStream.return_value = mock_stream
             rec.prepare_stream()
@@ -268,14 +278,14 @@ class TestStreamLifecycle:
     def test_prepare_stream_noop_if_already_open(self) -> None:
         rec = _make_recorder()
         rec._stream = MagicMock()  # already open
-        with patch("voiceflow.audio.sd") as mock_sd:
+        with patch("veery.audio.sd") as mock_sd:
             rec.prepare_stream()
         mock_sd.InputStream.assert_not_called()
 
     def test_start_recording_calls_prepare_if_no_stream(self) -> None:
         rec = _make_recorder()
         rec._vad_model = MagicMock()  # pre-loaded
-        with patch("voiceflow.audio.sd") as mock_sd:
+        with patch("veery.audio.sd") as mock_sd:
             mock_stream = MagicMock()
             mock_stream.active = True
             mock_sd.InputStream.return_value = mock_stream
@@ -299,11 +309,25 @@ class TestStreamLifecycle:
         rec = _make_recorder(vad_cfg=vad_cfg)
         mock_stream = MagicMock()
         rec._stream = mock_stream
-        rec._raw_buffer.append(np.zeros(16000, dtype=np.float32))
+        rec._raw_buffer.append(np.full(16000, 0.1, dtype=np.float32))
+        rec._state = _State.SPEECH_DETECTED  # VAD saw speech
 
         seg = rec.stop_and_flush()
 
         assert seg is not None
+        mock_stream.stop.assert_called_once()
+
+    def test_stop_and_flush_no_speech_returns_none(self) -> None:
+        """stop_and_flush returns None when raw audio is just ambient noise."""
+        rec = _make_recorder()
+        mock_stream = MagicMock()
+        rec._stream = mock_stream
+        rec._raw_buffer.append(np.zeros(16000, dtype=np.float32))
+        # _state remains WAITING (no speech detected)
+
+        seg = rec.stop_and_flush()
+
+        assert seg is None
         mock_stream.stop.assert_called_once()
 
     def test_is_recording_property(self) -> None:
@@ -322,7 +346,7 @@ class TestStreamLifecycle:
         rec._silence_frames = 5
         rec._done_event.set()
 
-        with patch("voiceflow.audio.sd") as mock_sd:
+        with patch("veery.audio.sd") as mock_sd:
             mock_sd.InputStream.return_value = MagicMock()
             rec.prepare_stream()
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-# Project root (two levels up from this file: src/voiceflow/config.py → voiceflow/)
+# Project root (two levels up from this file: src/veery/config.py → veery/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -51,7 +51,7 @@ STT_BACKENDS: tuple[tuple[str, str], ...] = (
 
 @dataclass(frozen=True)
 class JargonConfig:
-    dict_paths: tuple[str, ...] = ("jargon/quant_finance.yaml", "jargon/tech.yaml", "jargon/mined.yaml")
+    dict_paths: tuple[str, ...] = ("jargon/quant_finance.yaml", "jargon/tech.yaml")
     learned_path: str | None = "jargon/learned.yaml"  # Tier 2: auto-learned terms
     fuzzy_threshold: int = 82  # rapidfuzz score_cutoff (0-100, tuned down from 85 for accented STT)
     max_phrase_words: int = 3  # Try 3-word, 2-word, 1-word phrases

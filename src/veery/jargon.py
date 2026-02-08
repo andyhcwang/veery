@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 from rapidfuzz import fuzz, process
 
-from voiceflow.config import PROJECT_ROOT, JargonConfig
+from veery.config import PROJECT_ROOT, JargonConfig
 
 logger = logging.getLogger(__name__)
 

@@ -1,12 +1,12 @@
-# Contributing to VoiceFlow
+# Contributing to Veery
 
-Thanks for your interest in making bilingual dictation better! VoiceFlow is built by and for bilingual Chinese/English tech professionals, and community contributions are what keep it sharp.
+Thanks for your interest in making bilingual dictation better! Veery is built by and for bilingual Chinese/English tech professionals, and community contributions are what keep it sharp.
 
 ## Ways to Contribute
 
 ### 1. Submit Jargon Terms (Easiest, Highest Impact)
 
-The jargon system is VoiceFlow's core differentiator. Every term you add helps everyone.
+The jargon system is Veery's core differentiator. Every term you add helps everyone.
 
 **To add terms to an existing pack:**
 
@@ -57,11 +57,11 @@ terms:
 
 ### 2. Report STT Errors
 
-If VoiceFlow consistently gets a term wrong:
+If Veery consistently gets a term wrong:
 
 1. Open an issue with:
    - What you said (in your natural mixed zh/en)
-   - What VoiceFlow produced
+   - What Veery produced
    - What you expected
    - Which STT backend you're using (SenseVoice or Whisper)
 
@@ -74,8 +74,8 @@ Bug fixes, features, and improvements are welcome. For larger changes, open an i
 ## Development Setup
 
 ```bash
-git clone https://github.com/andyhcwang/voiceflow.git
-cd voiceflow
+git clone https://github.com/andyhcwang/veery.git
+cd veery
 uv sync
 ```
 
@@ -109,13 +109,13 @@ Audio → STT (SenseVoice / Whisper) → Jargon Correction → Filler Removal �
 ```
 
 Key files:
-- `src/voiceflow/app.py` -- Main orchestrator, menubar, state machine
-- `src/voiceflow/audio.py` -- Audio capture with Silero VAD
-- `src/voiceflow/stt.py` -- STT backends (SenseVoice + Whisper)
-- `src/voiceflow/jargon.py` -- Fuzzy + phonetic jargon matching
-- `src/voiceflow/corrector.py` -- Correction pipeline
-- `src/voiceflow/miner.py` -- Codebase jargon mining
-- `src/voiceflow/learner.py` -- Auto-learning from corrections
+- `src/veery/app.py` -- Main orchestrator, menubar, state machine
+- `src/veery/audio.py` -- Audio capture with Silero VAD
+- `src/veery/stt.py` -- STT backends (SenseVoice + Whisper)
+- `src/veery/jargon.py` -- Fuzzy + phonetic jargon matching
+- `src/veery/corrector.py` -- Correction pipeline
+- `src/veery/miner.py` -- Codebase jargon mining
+- `src/veery/learner.py` -- Auto-learning from corrections
 
 ## PR Guidelines
 
