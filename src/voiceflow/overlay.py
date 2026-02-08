@@ -417,7 +417,7 @@ class OverlayIndicator:
         self._run_on_main(_show)
 
     def show_success(self) -> None:
-        """Show brief success flash, then auto-hide after ~800ms."""
+        """Show brief success flash, then auto-hide after ~1.2s."""
         def _show():
             with self._lock:
                 if not self._ensure_panel():
@@ -435,7 +435,34 @@ class OverlayIndicator:
 
                 self._success_timer = (
                     _NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                        0.8, self._pill_view, b"successHideTimer:", None, False
+                        1.2, self._pill_view, b"successHideTimer:", None, False
+                    )
+                )
+
+        self._run_on_main(_show)
+
+    def show_warning(self, message: str) -> None:
+        """Show a brief warning message in the pill, then auto-hide after ~1.5s."""
+        def _show():
+            with self._lock:
+                if not self._ensure_panel():
+                    return
+                self._stop_timers()
+                self._pill_view._mode = None  # no dot
+                self._pill_view._bg_red = _BG_RED
+                self._pill_view._bg_green = _BG_GREEN
+                self._pill_view._bg_blue = _BG_BLUE
+                self._label.setTextColor_(
+                    _NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.6)
+                )
+                self._label.setStringValue_(message)
+                self._pill_view.setNeedsDisplay_(True)
+                self._panel.orderFrontRegardless()
+                self._fade_in()
+
+                self._success_timer = (
+                    _NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                        1.5, self._pill_view, b"successHideTimer:", None, False
                     )
                 )
 

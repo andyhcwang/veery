@@ -75,10 +75,9 @@ class VoiceFlowApp(rumps.App):
 
         # Recording mode toggle
         self._mode_item = rumps.MenuItem(
-            "Toggle Mode (press to start/stop)",
+            self._mode_label(),
             callback=self._on_toggle_mode,
         )
-        self._mode_item.state = 1 if self._recording_mode == "toggle" else 0
 
         # STT backend selector submenu
         self._stt_backend: str = self._config.stt.backend
@@ -193,6 +192,9 @@ class VoiceFlowApp(rumps.App):
                 self._recorder._ensure_vad_loaded()
                 logger.info("VAD model pre-loaded")
 
+            # Pre-load audio feedback sounds so first recording has no delay
+            sounds.preload()
+
             # Pre-download Whisper model from HuggingFace Hub with progress overlay.
             # SenseVoice uses ModelScope (not HF Hub), so FunASR handles its own download.
             stt_cfg = self._config.stt
@@ -208,7 +210,11 @@ class VoiceFlowApp(rumps.App):
                 ensure_model_downloaded(stt_cfg.whisper_model, progress_callback=_progress)
                 download_overlay.set_progress(1.0, "Loading model into memory...")
             else:
-                self._detail_item.title = "Loading STT model..."
+                backend_label = next(
+                    (label for bid, label in STT_BACKENDS if bid == stt_cfg.backend),
+                    stt_cfg.backend,
+                )
+                self._detail_item.title = f"Loading {backend_label}..."
 
             # STT model
             self._stt = create_stt(stt_cfg)
@@ -294,6 +300,12 @@ class VoiceFlowApp(rumps.App):
             return "Press Right \u2318 to start/stop"
         return "Hold Right \u2318 to dictate"
 
+    def _mode_label(self) -> str:
+        """Return the mode menu item label showing the alternative mode."""
+        if self._recording_mode == "toggle":
+            return "Switch to Hold Mode (hold to dictate)"
+        return "Switch to Toggle Mode (press to start/stop)"
+
     def _on_key_down(self) -> None:
         """Right Cmd pressed — behavior depends on recording mode."""
         if not self._ready.is_set():
@@ -340,6 +352,7 @@ class VoiceFlowApp(rumps.App):
                 self._recorder.prepare_stream()
             except Exception:
                 logger.exception("Failed to prepare audio stream")
+                self._recording_started.set()  # unblock any waiting _on_key_up
                 self._set_state(State.IDLE)
                 return
         threading.Thread(target=self._start_recording, daemon=True).start()
@@ -384,16 +397,22 @@ class VoiceFlowApp(rumps.App):
             return
         segment = self._recorder.stop_and_flush()
         if segment is None:
-            rumps.notification("VoiceFlow", "", "No speech detected")
-            self._set_state(State.IDLE)
+            self._overlay.show_warning("No speech detected")
+            self._set_state(State.IDLE, skip_overlay=True)
             return
-        # Process on a background thread to avoid blocking the hotkey listener
+        # Transition to PROCESSING synchronously so a rapid re-press of the
+        # hotkey sees the correct state before the worker thread starts.
+        self._set_state(State.PROCESSING)
         worker = threading.Thread(target=self._process_segment, args=(segment,), daemon=True)
         worker.start()
 
     def _process_segment(self, segment) -> None:
-        """Process a captured audio segment: STT -> correct -> paste."""
-        self._set_state(State.PROCESSING)
+        """Process a captured audio segment: STT -> correct -> paste.
+
+        Note: state is already PROCESSING (set by _stop_recording before
+        spawning this thread) to avoid a race window where rapid hotkey
+        presses could re-enter recording.
+        """
         success = False
         try:
             if self._stt is None:
@@ -402,7 +421,7 @@ class VoiceFlowApp(rumps.App):
 
             raw_text = self._stt.transcribe(segment.audio, segment.sample_rate)
             if not raw_text:
-                rumps.notification("VoiceFlow", "", "Could not transcribe audio")
+                self._overlay.show_warning("No transcription")
                 return
 
             logger.info("Transcribed: %s", raw_text)
@@ -433,7 +452,7 @@ class VoiceFlowApp(rumps.App):
             rumps.notification("VoiceFlow", "Error", str(e))
         finally:
             if success:
-                # Show success flash — it auto-hides after 800ms
+                sounds.play_success()
                 self._overlay.show_success()
             self._set_state(State.IDLE, skip_overlay=success)
             if self._session_count > 0:
@@ -469,9 +488,9 @@ class VoiceFlowApp(rumps.App):
 
     def _on_toggle_mode(self, sender) -> None:
         """Switch between hold-to-talk and press-to-toggle recording modes."""
-        sender.state = not sender.state
-        self._recording_mode = "toggle" if sender.state else "hold"
+        self._recording_mode = "hold" if self._recording_mode == "toggle" else "toggle"
         self._hotkey_item.title = self._hotkey_hint()
+        self._mode_item.title = self._mode_label()
         logger.info("Recording mode: %s", self._recording_mode)
 
     def _build_stt_model_submenu(self) -> None:

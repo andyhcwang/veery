@@ -66,8 +66,8 @@ class TestWhisperSTT:
 
         assert result == ""
 
-    def test_transcribe_temp_file_cleanup(self, tmp_path) -> None:
-        """Verify temp wav file is cleaned up after successful transcription."""
+    def test_transcribe_temp_file_reused(self, tmp_path) -> None:
+        """Verify the same pre-allocated temp wav path is reused across calls."""
         from voiceflow.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
@@ -81,18 +81,18 @@ class TestWhisperSTT:
         # Patch sys.modules so the lazy `import mlx_whisper` / `import soundfile`
         # inside transcribe() resolves to our mocks/real modules.
         with patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": sf}):
-            result = stt.transcribe(audio, 16000)
+            result1 = stt.transcribe(audio, 16000)
+            result2 = stt.transcribe(audio, 16000)
 
-        assert result == "hello"
-        # The temp file should have been unlinked by the finally block.
-        call_args = mock_mlx.transcribe.call_args
-        tmp_wav_path = call_args[0][0]
-        from pathlib import Path
+        assert result1 == "hello"
+        assert result2 == "hello"
+        # Both calls should use the same pre-allocated temp path
+        calls = mock_mlx.transcribe.call_args_list
+        assert calls[0][0][0] == calls[1][0][0]
+        assert calls[0][0][0] == stt._tmp_wav
 
-        assert not Path(tmp_wav_path).exists()
-
-    def test_transcribe_temp_file_cleanup_on_error(self) -> None:
-        """Temp file is cleaned up even when transcription raises."""
+    def test_transcribe_temp_file_survives_error(self) -> None:
+        """Temp file persists for reuse even when transcription raises."""
         from voiceflow.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
@@ -114,9 +114,8 @@ class TestWhisperSTT:
 
         assert result == ""
         assert len(created_paths) == 1
-        from pathlib import Path
-
-        assert not Path(created_paths[0]).exists()
+        # The pre-allocated temp path should be the same as the instance's
+        assert created_paths[0] == stt._tmp_wav
 
     def test_load_model_warmup(self) -> None:
         """load_model() transcribes a silent wav to warm up, sets _loaded."""

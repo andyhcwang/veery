@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # Lazy-loaded NSSound instances
 _start_sound = None
 _stop_sound = None
+_success_sound = None
 _loaded = False
 
 
@@ -66,7 +67,7 @@ def _to_wav_bytes(audio: np.ndarray, sample_rate: int = 44100) -> bytes:
 
 def _load_sounds() -> None:
     """Generate tones and wrap as NSSound objects."""
-    global _start_sound, _stop_sound, _loaded
+    global _start_sound, _stop_sound, _success_sound, _loaded
     if _loaded:
         return
 
@@ -83,10 +84,24 @@ def _load_sounds() -> None:
         stop_data = AppKit.NSData.dataWithBytes_length_(stop_wav, len(stop_wav))
         _stop_sound = AppKit.NSSound.alloc().initWithData_(stop_data)
 
+        # Success: short bright ascending chime (600→800 Hz, 60ms, quieter)
+        success_wav = _to_wav_bytes(_generate_tone(600, 800, 60, amplitude=0.10))
+        success_data = AppKit.NSData.dataWithBytes_length_(success_wav, len(success_wav))
+        _success_sound = AppKit.NSSound.alloc().initWithData_(success_data)
+
         _loaded = True
         logger.debug("Audio feedback sounds loaded")
     except Exception:
         logger.debug("Could not load audio feedback sounds")
+
+
+def preload() -> None:
+    """Pre-load sounds during app initialization.
+
+    Eliminates ~10-20ms delay on the first recording start by generating
+    tones and creating NSSound objects ahead of time.
+    """
+    _load_sounds()
 
 
 def play_start() -> None:
@@ -103,3 +118,11 @@ def play_stop() -> None:
     if _stop_sound is not None:
         _stop_sound.stop()
         _stop_sound.play()
+
+
+def play_success() -> None:
+    """Play the success completion sound (non-blocking)."""
+    _load_sounds()
+    if _success_sound is not None:
+        _success_sound.stop()
+        _success_sound.play()

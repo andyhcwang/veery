@@ -10,7 +10,9 @@ from voiceflow.jargon import JargonCorrector
 
 logger = logging.getLogger(__name__)
 
-# Filler words/phrases to remove (case-insensitive, word-boundary-aware)
+# Filler words/phrases to remove (case-insensitive, word-boundary-aware).
+# Combined into a single alternation regex for one-pass removal instead
+# of iterating 12 separate patterns sequentially.
 _EN_FILLERS = [
     r"\bum\b", r"\buh\b", r"\bumm\b", r"\buhh\b",
     r"\byou know\b", r"\bI mean\b",
@@ -20,16 +22,17 @@ _ZH_FILLERS = [
     "嗯", "额", "啊", "呃",
     "那个", "就是说", "然后吧",
 ]
-_FILLER_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _EN_FILLERS]
-_FILLER_PATTERNS += [re.compile(re.escape(f)) for f in _ZH_FILLERS]
+_FILLER_PATTERN = re.compile(
+    "|".join(_EN_FILLERS + [re.escape(f) for f in _ZH_FILLERS]),
+    re.IGNORECASE,
+)
 # Clean up multiple spaces left after removal
 _MULTI_SPACE = re.compile(r"  +")
 
 
 def remove_fillers(text: str) -> str:
     """Remove common filler words/sounds from transcribed text."""
-    for pat in _FILLER_PATTERNS:
-        text = pat.sub("", text)
+    text = _FILLER_PATTERN.sub("", text)
     text = _MULTI_SPACE.sub(" ", text).strip()
     return text
 

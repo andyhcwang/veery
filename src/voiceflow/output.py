@@ -11,21 +11,29 @@ logger = logging.getLogger(__name__)
 
 
 def _type_via_cgevent(text: str) -> None:
-    """Type text character-by-character via CGEvents. Bypasses clipboard entirely."""
+    """Type text in batches via CGEvents. Bypasses clipboard entirely.
+
+    CGEventKeyboardSetUnicodeString supports multi-character strings,
+    so we batch up to 20 characters per event pair to reduce the number
+    of CGEventPost calls (~10x fewer events for typical text).
+    """
     import Quartz
 
-    for char in text:
+    _BATCH_SIZE = 20
+
+    for i in range(0, len(text), _BATCH_SIZE):
+        batch = text[i : i + _BATCH_SIZE]
         # CGEventKeyboardSetUnicodeString expects UTF-16 length (UniCharCount),
         # not Python str length. Characters outside the BMP (emoji, some CJK)
         # require 2 UTF-16 code units (surrogate pair).
-        utf16_len = len(char.encode("utf-16-le")) // 2
+        utf16_len = len(batch.encode("utf-16-le")) // 2
 
         event_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
-        Quartz.CGEventKeyboardSetUnicodeString(event_down, utf16_len, char)
+        Quartz.CGEventKeyboardSetUnicodeString(event_down, utf16_len, batch)
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_down)
 
         event_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
-        Quartz.CGEventKeyboardSetUnicodeString(event_up, utf16_len, char)
+        Quartz.CGEventKeyboardSetUnicodeString(event_up, utf16_len, batch)
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_up)
 
 

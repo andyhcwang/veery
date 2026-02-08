@@ -225,7 +225,7 @@ class TestOverlayIndicator:
         assert call_args[0][4] is True  # repeats
 
     def test_show_success_starts_hide_timer(self, mock_appkit, overlay_with_panel):
-        """show_success starts an NSTimer that auto-hides after 800ms."""
+        """show_success starts an NSTimer that auto-hides after 1200ms."""
         def run_sync(block):
             block()
 
@@ -235,7 +235,7 @@ class TestOverlayIndicator:
 
         mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_called_once()
         call_args = mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args
-        assert call_args[0][0] == 0.8  # 800ms
+        assert call_args[0][0] == 1.2  # 1200ms
         assert call_args[0][2] == b"successHideTimer:"
         assert call_args[0][4] is False  # does not repeat
 
@@ -252,6 +252,41 @@ class TestOverlayIndicator:
         mock_appkit._NSScreen.mainScreen.return_value = None
         overlay = OverlayIndicator()
         assert overlay._ensure_panel() is False
+
+    def test_show_warning_dispatches_to_main(self, overlay_with_panel):
+        """show_warning dispatches work to main thread via callAfter."""
+        with patch("voiceflow.overlay.OverlayIndicator._run_on_main") as mock_run:
+            overlay_with_panel.show_warning("No speech detected")
+            mock_run.assert_called_once()
+
+    def test_show_warning_calls_block_directly(self, mock_appkit, overlay_with_panel):
+        """When _run_on_main executes synchronously, warning state is set."""
+        def run_sync(block):
+            block()
+
+        overlay = overlay_with_panel
+        overlay._run_on_main = run_sync
+        overlay.show_warning("No speech detected")
+
+        overlay._label.setStringValue_.assert_called_with("No speech detected")
+        overlay._pill_view.setNeedsDisplay_.assert_called_with(True)
+        overlay._panel.orderFrontRegardless.assert_called()
+        assert overlay._pill_view._mode is None  # no dot for warnings
+
+    def test_show_warning_starts_auto_hide_timer(self, mock_appkit, overlay_with_panel):
+        """show_warning starts an NSTimer that auto-hides after 1.5s."""
+        def run_sync(block):
+            block()
+
+        overlay = overlay_with_panel
+        overlay._run_on_main = run_sync
+        overlay.show_warning("Test warning")
+
+        mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_called_once()
+        call_args = mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args
+        assert call_args[0][0] == 1.5  # 1500ms
+        assert call_args[0][2] == b"successHideTimer:"
+        assert call_args[0][4] is False  # does not repeat
 
     def test_hide_noop_when_no_panel(self):
         """hide() is safe to call when panel is None."""

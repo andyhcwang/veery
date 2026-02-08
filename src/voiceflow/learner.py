@@ -31,8 +31,8 @@ class CorrectionLearner:
         self._learned_path = learned_path
         self._promotion_threshold = config.promotion_threshold
 
-        # (variant_lower, canonical) -> count
-        self._pending: dict[tuple[str, str], int] = {}
+        # (variant_lower, canonical) -> {"count": int, "first_seen": str}
+        self._pending: dict[tuple[str, str], dict] = {}
         self._load_pending()
 
     def _load_pending(self) -> None:
@@ -43,7 +43,10 @@ class CorrectionLearner:
             data = yaml.safe_load(f) or {}
         for entry in data.get("pending", []):
             key = (entry["variant"].lower(), entry["canonical"])
-            self._pending[key] = entry.get("count", 1)
+            self._pending[key] = {
+                "count": entry.get("count", 1),
+                "first_seen": entry.get("first_seen", datetime.now(tz=UTC).strftime("%Y-%m-%d")),
+            }
 
     def log_correction(self, original_full: str, correction_phrase: str) -> str | None:
         """Find what the user corrected and log it.
@@ -95,8 +98,12 @@ class CorrectionLearner:
         canonical = correction_clean
         key = (variant, canonical)
 
-        self._pending[key] = self._pending.get(key, 0) + 1
-        count = self._pending[key]
+        entry = self._pending.get(key)
+        if entry is None:
+            entry = {"count": 0, "first_seen": datetime.now(tz=UTC).strftime("%Y-%m-%d")}
+            self._pending[key] = entry
+        entry["count"] += 1
+        count = entry["count"]
         logger.info(
             "Correction logged: '%s' -> '%s' (count: %d/%d)",
             variant,
@@ -143,12 +150,12 @@ class CorrectionLearner:
 
         # Rebuild pending section from in-memory state
         pending_list = []
-        for (variant, canonical), count in self._pending.items():
+        for (variant, canonical), entry in self._pending.items():
             pending_list.append({
                 "variant": variant,
                 "canonical": canonical,
-                "count": count,
-                "first_seen": datetime.now(tz=UTC).strftime("%Y-%m-%d"),
+                "count": entry["count"],
+                "first_seen": entry["first_seen"],
             })
         data["pending"] = pending_list
 
