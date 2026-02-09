@@ -48,6 +48,19 @@ terms:
 
 3. Open a PR with a brief description of the domain.
 
+**Using custom dictionaries:** Add your YAML file to `config.yaml`:
+
+```yaml
+jargon:
+  dict_paths:
+    - jargon/tech.yaml
+    - jargon/quant_finance.yaml
+    - jargon/community/ai_ml.yaml         # LLM models, RAG, LoRA, etc.
+    - jargon/community/devops_cloud.yaml   # Kubernetes, Terraform, CI/CD
+    - jargon/community/frontend.yaml       # Next.js, React, Tailwind, etc.
+    - jargon/my_domain.yaml               # Your custom pack
+```
+
 **Variant quality guidelines:**
 - Each variant should be a plausible STT misrecognition, not just a typo
 - Test by actually speaking the term to SenseVoice or Whisper if possible

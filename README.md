@@ -4,12 +4,23 @@
 
 Purpose-built for how bilingual Chinese/English tech professionals actually speak -- mixed-language, jargon-heavy, and running entirely on your Mac for free.
 
-<!-- Demo GIF placeholder: Screen recording showing mixed zh/en dictation with jargon correction -->
+<!-- TODO: Replace with demo GIF/video before launch -->
 
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![macOS](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-lightgrey.svg)](https://support.apple.com/en-us/116943)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Open Source](https://img.shields.io/badge/open%20source-yes-brightgreen.svg)](https://github.com/andyhcwang/veery)
+
+## Table of Contents
+
+- [The Problem](#the-problem)
+- [How It Works](#how-it-works)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [The Jargon System](#the-jargon-system)
+- [Configuration](#configuration)
+- [Comparison](#comparison)
+- [Contributing](#contributing)
 
 ## The Problem
 
@@ -119,59 +130,23 @@ For terms where the STT gets the sounds right but the spelling wrong, consonant-
 
 ### Adding your own terms
 
-Create or edit a YAML file in `jargon/`:
-
-```yaml
-# jargon/my_domain.yaml
-terms:
-  MyCompanyName:
-    - my company name
-    - my company
-  InternalTool:
-    - internal tool
-    - inter nal tool
-```
-
-Then add it to your `config.yaml`:
-
-```yaml
-jargon:
-  dict_paths:
-    - jargon/tech.yaml
-    - jargon/quant_finance.yaml
-    - jargon/my_domain.yaml
-```
-
-Or open jargon files directly from the Veery menubar under **Jargon Dictionaries**.
+Create a YAML file in `jargon/`, add your terms with STT variants, and reference it in `config.yaml`. Or open jargon files directly from the Veery menubar under **Jargon Dictionaries**. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full format.
 
 ### Community jargon packs
 
-Pre-built packs for common domains. To use them, add to your `config.yaml`:
-
-```yaml
-jargon:
-  dict_paths:
-    - jargon/tech.yaml
-    - jargon/community/ai_ml.yaml         # LLM models, RAG, LoRA, etc.
-    - jargon/community/devops_cloud.yaml   # Kubernetes, Terraform, CI/CD
-    - jargon/community/frontend.yaml       # Next.js, React, Tailwind, etc.
-```
-
-Want to contribute a pack for your domain? See [Contributing](#contributing).
+Pre-built packs ship for common domains: `ai_ml.yaml`, `devops_cloud.yaml`, `frontend.yaml`. Add them to your `config.yaml` under `jargon.dict_paths`. Want to contribute a pack for your domain? See [Contributing](#contributing).
 
 ### Mining jargon from your codebase
-
-Veery can scan your Python projects and suggest terms to add:
 
 ```bash
 uv run veery --mine ~/code ~/projects/ml-pipeline
 ```
 
-It extracts CamelCase class names, ALL_CAPS constants, and imported module names, filters out standard library, and shows you what's new vs. already in your dictionaries.
+Extracts CamelCase class names, ALL_CAPS constants, and imported modules from your projects -- so your jargon stays ahead of any model's training data.
 
 ### Auto-learning
 
-When Veery gets a term wrong, just re-dictate the correction within 30 seconds. Veery detects the correction, logs it, and after 3 identical corrections, automatically promotes it to your learned dictionary (`jargon/learned.yaml`). No manual YAML editing needed.
+Re-dictate a correction within 30 seconds and Veery learns it automatically. After 3 identical corrections, the term is promoted to your learned dictionary. No manual YAML editing needed.
 
 ## Configuration
 
