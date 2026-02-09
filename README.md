@@ -1,8 +1,8 @@
 # Veery
 
-**Dictation that speaks your language. Both of them.**
+**Dictation that speaks your language. All of them. Entirely on your Mac.**
 
-Purpose-built for how bilingual Chinese/English tech professionals actually speak -- mixed-language, jargon-heavy, and running entirely on your Mac for free.
+You're a multilingual professional. You switch between Slack and WeChat all day, mixing English jargon into your native language mid-sentence. Every dictation app chokes on it. Veery was built for exactly that — entirely on your Mac, for free.
 
 <!-- TODO: Replace with demo GIF/video before launch -->
 
@@ -24,16 +24,14 @@ Purpose-built for how bilingual Chinese/English tech professionals actually spea
 
 ## The Problem
 
-You say "帮我review一下这个PR，看看API的latency有没有改善" and your dictation app produces garbage. Apple Dictation forces you to pick one language. Wispr Flow and SuperWhisper are English-first -- they don't understand that "Sharpe ratio" should stay in English when you're speaking Chinese, not become "夏普率". And every tool turns "PyTorch" into "pie torch" and "DuckDB" into "duck dee bee" because their models have never seen your jargon.
-
-You've tried five dictation apps. They all fail at the same thing: **mixed-language technical speech**. You've resigned yourself to typing everything, even though dictation would be 3-5x faster.
+You say "帮我review一下这个PR，看看API的latency有没有改善" and your dictation app produces garbage. Apple Dictation forces you to pick one language. Wispr Flow and SuperWhisper don't understand that "Sharpe ratio" should stay in English, not become "夏普率". And every tool turns "PyTorch" into "pie torch" because their models have never seen your jargon.
 
 Veery was built because no one else was going to build it.
 
 ## How It Works
 
 ```
-Hold Right Cmd → Speak naturally in zh/en → Release → Text appears
+Hold Right Cmd → Speak naturally in any language mix → Release → Text appears
 
 Audio → STT → Jargon Correction → Filler Removal → Paste to active app
         ↓           ↓                    ↓
@@ -48,7 +46,7 @@ Audio → STT → Jargon Correction → Filler Removal → Paste to active app
 ## Features
 
 - **Push-to-talk & toggle mode** -- Hold Right Cmd to record, or switch to press-to-toggle for longer dictation sessions
-- **Bilingual jargon preservation** -- English terms stay in English in Chinese text ("API", "Kubernetes", "Sharpe ratio" never get transliterated)
+- **Multilingual jargon preservation** -- English terms stay in English ("API", "Kubernetes", "Sharpe ratio" never get transliterated into your native language)
 - **Customizable YAML jargon dictionaries** -- fuzzy matching + phonetic matching catches STT errors like "pie torch" -> PyTorch, "duck dee bee" -> DuckDB
 - **Community jargon packs** -- Pre-built packs for AI/ML, DevOps/Cloud, and Frontend/Web (contribute your own!)
 - **Auto-learning from corrections** -- Re-dictate within 30 seconds and Veery learns the correction automatically
@@ -96,7 +94,7 @@ On first launch, Veery will:
 
 > **Note:** First-time setup requires an internet connection to download models. After that, Veery works fully offline.
 
-Hold **Right Cmd**, speak in whatever mix of Chinese and English comes naturally, release, and watch the text appear.
+Hold **Right Cmd**, speak in whatever mix of languages comes naturally, release, and watch the text appear.
 
 ## The Jargon System
 
@@ -189,14 +187,14 @@ learning:
 |---|---|---|---|---|
 | **Price** | Free forever | $8.49/mo | $10/mo | Free |
 | **Privacy** | 100% local | Local | Local + cloud options | Cloud |
-| **Bilingual zh/en** | Purpose-built | Multi-lang (generic) | Multi-lang (generic) | Single language only |
+| **Multilingual** | Purpose-built | Multi-lang (generic) | Multi-lang (generic) | Single language only |
 | **Jargon handling** | Fuzzy + phonetic + auto-learn | Find-and-replace | Auto-learn | None |
 | **Chinese STT** | SenseVoice (SOTA Chinese) | Whisper (English-first) | Proprietary | Apple ASR |
 | **Custom dictionaries** | YAML (open, editable) | Vocabulary hints | Manual add | None |
 | **Codebase mining** | Yes (`--mine`) | No | No | No |
 | **Open source** | Yes | No | No | No |
 
-Veery doesn't compete on polish or mobile support. It wins on the axis that matters to you: **mixed zh/en technical speech with domain jargon**.
+Veery doesn't compete on polish or mobile support. It wins on the axis that matters to you: **mixed-language technical speech with domain jargon**.
 
 ## Contributing
 
