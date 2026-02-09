@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Environment / secrets
+.env
+*.pem
+credentials.json
+
+# Logs
+*.log
+
+# Internal docs (not for public consumption)
+docs/
+
+# Auto-generated jargon (user-specific)
+jargon/mined.yaml
+jargon/learned.yaml

@@ -1,0 +1,74 @@
+[project]
+name = "veery"
+version = "0.1.0"
+description = "macOS bilingual dictation with domain jargon support"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+authors = [{name = "Andy Wang"}]
+keywords = ["dictation", "speech-to-text", "bilingual", "chinese", "macos", "menubar", "jargon"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    # Audio
+    "sounddevice>=0.5",
+    "numpy>=2.0",
+    # VAD
+    "onnxruntime>=1.17",
+    # STT
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "funasr>=1.1",
+    "mlx-whisper>=0.4",
+    "soundfile>=0.12",
+    "tiktoken>=0.7",  # Pin to version with pre-built wheels (mlx-whisper dep)
+    # Pin llvmlite/numba for Python 3.13 compat (funasr→umap-learn→pynndescent→llvmlite)
+    "llvmlite>=0.44",
+    "numba>=0.61",
+    # Jargon
+    "rapidfuzz>=3.6",
+    "pyyaml>=6.0",
+    # macOS app
+    "rumps>=0.4",
+    "pynput>=1.7",
+    "pyobjc-framework-Cocoa>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/andyhcwang/veery"
+Repository = "https://github.com/andyhcwang/veery"
+Issues = "https://github.com/andyhcwang/veery/issues"
+
+[project.scripts]
+veery = "veery.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/veery"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "PD"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]

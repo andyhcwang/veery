@@ -1,0 +1,33 @@
+# Veery configuration — all values are optional (defaults are sensible)
+# Uncomment and modify as needed.
+
+# audio:
+#   sample_rate: 16000
+#   chunk_duration_ms: 96
+#   max_duration_sec: 30.0
+
+# vad:
+#   threshold: 0.4
+#   silence_duration_sec: 2.0
+
+# stt:
+#   backend: "whisper"            # "sensevoice" or "whisper"
+#   model_name: "iic/SenseVoiceSmall"
+#   language: "auto"
+
+# jargon:
+#   dict_paths:
+#     - "jargon/quant_finance.yaml"
+#     - "jargon/tech.yaml"
+#     # Community jargon packs — uncomment the ones relevant to your work:
+#     # - "jargon/community/ai_ml.yaml"        # AI/ML model names, concepts, tools
+#     # - "jargon/community/devops_cloud.yaml"  # Kubernetes, AWS, CI/CD, observability
+#     # - "jargon/community/frontend.yaml"      # Next.js, Tailwind, React ecosystem
+#   fuzzy_threshold: 82
+
+# hotkey:
+#   key_combo: "right_cmd"
+#   mode: "hold"                  # "hold" (push-to-talk) or "toggle" (press-to-toggle)
+
+# output:
+#   cgevent_char_limit: 500

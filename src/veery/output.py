@@ -1,0 +1,101 @@
+"""Text output to the active macOS application via CGEvent typing or clipboard paste."""
+
+from __future__ import annotations
+
+import logging
+import time
+
+from veery.config import OutputConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _type_via_cgevent(text: str) -> None:
+    """Type text in batches via CGEvents. Bypasses clipboard entirely.
+
+    CGEventKeyboardSetUnicodeString supports multi-character strings,
+    so we batch up to 20 characters per event pair to reduce the number
+    of CGEventPost calls (~10x fewer events for typical text).
+    """
+    import Quartz
+
+    _BATCH_SIZE = 20
+
+    for i in range(0, len(text), _BATCH_SIZE):
+        batch = text[i : i + _BATCH_SIZE]
+        # CGEventKeyboardSetUnicodeString expects UTF-16 length (UniCharCount),
+        # not Python str length. Characters outside the BMP (emoji, some CJK)
+        # require 2 UTF-16 code units (surrogate pair).
+        utf16_len = len(batch.encode("utf-16-le")) // 2
+
+        event_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
+        Quartz.CGEventKeyboardSetUnicodeString(event_down, utf16_len, batch)
+        Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_down)
+
+        event_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
+        Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_up)
+
+
+def _paste_via_clipboard(text: str, paste_delay_sec: float = 0.05) -> None:
+    """Save clipboard, paste text via Cmd+V, then restore original clipboard."""
+    import AppKit
+    import Quartz
+
+    pb = AppKit.NSPasteboard.generalPasteboard()
+
+    # Save ALL pasteboard types (not just plain text)
+    old_items: list[dict] = []
+    for item in pb.pasteboardItems() or []:
+        saved: dict = {}
+        for ptype in item.types():
+            data = item.dataForType_(ptype)
+            if data:
+                saved[ptype] = data
+        old_items.append(saved)
+
+    # Write our text to the clipboard, paste, then restore
+    pb.clearContents()
+    pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+
+    try:
+        # Simulate Cmd+V via CGEvent
+        cmd_v_down = Quartz.CGEventCreateKeyboardEvent(None, 9, True)  # 9 = 'v' keycode
+        Quartz.CGEventSetFlags(cmd_v_down, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, cmd_v_down)
+
+        cmd_v_up = Quartz.CGEventCreateKeyboardEvent(None, 9, False)
+        Quartz.CGEventSetFlags(cmd_v_up, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, cmd_v_up)
+
+        # Wait for paste to complete
+        time.sleep(paste_delay_sec)
+    finally:
+        # Restore original clipboard
+        pb.clearContents()
+        items_to_restore = []
+        for saved in old_items:
+            item = AppKit.NSPasteboardItem.alloc().init()
+            for ptype, data in saved.items():
+                item.setData_forType_(data, ptype)
+            items_to_restore.append(item)
+        if items_to_restore:
+            pb.writeObjects_(items_to_restore)
+
+
+def paste_to_active_app(text: str, config: OutputConfig | None = None) -> None:
+    """Output text to the active application.
+
+    Short text uses CGEvent batch typing (20 chars per event, no clipboard).
+    Long text uses clipboard paste with save/restore.
+    """
+    if not text:
+        return
+
+    cfg = config or OutputConfig()
+
+    if len(text) <= cfg.cgevent_char_limit:
+        logger.debug("Typing %d chars via CGEvent", len(text))
+        _type_via_cgevent(text)
+    else:
+        logger.debug("Pasting %d chars via clipboard", len(text))
+        _paste_via_clipboard(text, paste_delay_sec=cfg.paste_delay_ms / 1000.0)

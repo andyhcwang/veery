@@ -1,0 +1,208 @@
+# DevOps & Cloud Community Jargon Pack
+# Covers Kubernetes, cloud services, CI/CD, and observability tools
+# Last updated: 2026-02-08
+# Format: canonical_form: [phonetic_variants_the_STT_might_produce]
+
+terms:
+  # --- Container Orchestration ---
+  Kubernetes:
+    - kubernetes
+    - cube er net ease
+    - cube netties
+    - 酷伯内特斯
+  k8s:
+    - k eights
+    - k eight s
+    - k 8 s
+    - kates
+  kubectl:
+    - kube c t l
+    - kube control
+    - kube cuttle
+    - cube c t l
+  Docker:
+    - docker
+    - dock er
+    - 多克
+  Dockerfile:
+    - docker file
+    - dock er file
+    - docker foul
+  Terraform:
+    - terraform
+    - terra form
+    - tear a form
+  Helm:
+    - helm
+    - hell m
+  ArgoCD:
+    - argo cd
+    - argo c d
+    - argo see dee
+  Istio:
+    - istio
+    - is tee oh
+    - east ee oh
+  Envoy:
+    - envoy
+    - en voy
+  Podman:
+    - pod man
+    - podman
+    - pod men
+  etcd:
+    - et cd
+    - e t c d
+    - etcd
+
+  # --- AWS ---
+  AWS Lambda:
+    - aws lambda
+    - a w s lambda
+    - amazon lambda
+  CloudFront:
+    - cloud front
+    - cloudfront
+    - cloud frunt
+  S3:
+    - s three
+    - s 3
+    - s3
+  EC2:
+    - e c two
+    - e c 2
+    - ec2
+  EKS:
+    - e k s
+    - eks
+    - e k es
+  ECS:
+    - e c s
+    - ecs
+  RDS:
+    - r d s
+    - rds
+  DynamoDB:
+    - dynamo db
+    - dynamo d b
+    - dynamodb
+  SQS:
+    - s q s
+    - sqs
+  SNS:
+    - s n s
+    - sns
+  IAM:
+    - i a m
+    - iam
+    - i am
+  VPC:
+    - v p c
+    - vpc
+
+  # --- GCP ---
+  GKE:
+    - g k e
+    - gke
+    - gee k e
+  BigQuery:
+    - big query
+    - bigquery
+  Cloud Run:
+    - cloud run
+    - cloud runner
+  Pub/Sub:
+    - pub sub
+    - pub slash sub
+
+  # --- Azure ---
+  Azure AKS:
+    - azure aks
+    - azure a k s
+    - a sure aks
+  Azure DevOps:
+    - azure dev ops
+    - a sure dev ops
+
+  # --- CI/CD ---
+  GitHub Actions:
+    - github actions
+    - git hub actions
+    - github action
+  CircleCI:
+    - circle ci
+    - circle c i
+    - circle see eye
+  Jenkins:
+    - jenkins
+    - jenkin
+  GitLab CI:
+    - gitlab ci
+    - git lab c i
+    - git lab ci
+  Tekton:
+    - tekton
+    - tech ton
+  Flux:
+    - flux
+    - fluxcd
+
+  # --- Observability ---
+  Grafana:
+    - grafana
+    - grafona
+    - gra fana
+  Prometheus:
+    - prometheus
+    - prom etheus
+    - promethius
+  Datadog:
+    - data dog
+    - datadog
+    - data dock
+  OpenTelemetry:
+    - open telemetry
+    - open tell em a tree
+    - otel
+    - o tel
+  Jaeger:
+    - jaeger
+    - yager
+    - jay ger
+  Kibana:
+    - kibana
+    - ki bana
+    - key bana
+  Elasticsearch:
+    - elastic search
+    - elasticsearch
+    - elastic surge
+  PagerDuty:
+    - pager duty
+    - page er duty
+    - pagerduty
+
+  # --- Infrastructure as Code ---
+  Pulumi:
+    - pulumi
+    - pulu me
+    - pull umi
+  Ansible:
+    - ansible
+    - ans ible
+    - an sable
+  CloudFormation:
+    - cloud formation
+    - cloudformation
+    - cloud for mation
+  CDK:
+    - c d k
+    - cdk
+    - see d k
+  Nginx:
+    - nginx
+    - engine x
+    - en gin x
+  Caddy:
+    - caddy
+    - caddie
