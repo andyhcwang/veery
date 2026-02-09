@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from veery.config import STTConfig
 
@@ -354,4 +356,177 @@ class TestEnsureSenseVoiceDownloaded:
         assert len(call_args[1]["progress_callbacks"]) == 1
         # progress_callback should have been called for start (0.0) and end (1.0)
         callback.assert_any_call(0.0, "Downloading SenseVoiceSmall...")
+        callback.assert_any_call(1.0, "Download complete")
+
+
+# ---------------------------------------------------------------------------
+# _clean_incomplete_cache
+# ---------------------------------------------------------------------------
+
+
+class TestCleanIncompleteCache:
+    def test_removes_incomplete_and_lock_files(self, tmp_path) -> None:
+        """Deletes .incomplete blobs and .lock files from the model blob dir."""
+        from veery.stt import _clean_incomplete_cache
+
+        model_dir = tmp_path / "models--org--model" / "blobs"
+        model_dir.mkdir(parents=True)
+        (model_dir / "abc123.incomplete").touch()
+        (model_dir / "def456.lock").touch()
+        (model_dir / "good_blob").touch()
+
+        mock_constants = MagicMock()
+        mock_constants.HF_HUB_CACHE = str(tmp_path)
+        with patch.dict("sys.modules", {"huggingface_hub.constants": mock_constants}):
+            deleted = _clean_incomplete_cache("org/model")
+
+        assert deleted == 2
+        assert not (model_dir / "abc123.incomplete").exists()
+        assert not (model_dir / "def456.lock").exists()
+        assert (model_dir / "good_blob").exists()
+
+    def test_noop_when_model_dir_missing(self, tmp_path) -> None:
+        """Returns 0 when the model cache directory doesn't exist."""
+        from veery.stt import _clean_incomplete_cache
+
+        mock_constants = MagicMock()
+        mock_constants.HF_HUB_CACHE = str(tmp_path)
+        with patch.dict("sys.modules", {"huggingface_hub.constants": mock_constants}):
+            deleted = _clean_incomplete_cache("org/nonexistent")
+
+        assert deleted == 0
+
+
+# ---------------------------------------------------------------------------
+# _snapshot_download_with_stall_detection
+# ---------------------------------------------------------------------------
+
+
+class TestStallDetection:
+    def test_raises_on_stall(self) -> None:
+        """Raises DownloadStalled when progress stops for too long."""
+        from veery.stt import DownloadStalled, _snapshot_download_with_stall_detection
+
+        def fake_snapshot_download(repo_id):
+            # Simulate a stall: sleep longer than stall timeout
+            time.sleep(10)
+
+        mock_tqdm_module = MagicMock()
+        mock_hf_hub = MagicMock()
+        mock_hf_hub.snapshot_download = fake_snapshot_download
+        mock_hf_hub_utils = MagicMock()
+        mock_hf_hub_utils._tqdm = mock_tqdm_module
+        mock_hf_hub_utils.tqdm = MagicMock
+
+        with (
+            patch("veery.stt._STALL_TIMEOUT_SEC", 1),
+            patch.dict("sys.modules", {
+                "huggingface_hub": mock_hf_hub,
+                "huggingface_hub.utils": mock_hf_hub_utils,
+                "huggingface_hub.utils._tqdm": mock_tqdm_module,
+            }),
+        ):
+            with pytest.raises(DownloadStalled):
+                _snapshot_download_with_stall_detection("org/model")
+
+    def test_completes_normally(self) -> None:
+        """Normal download completes without triggering stall detection."""
+        from veery.stt import _snapshot_download_with_stall_detection
+
+        def fast_download(repo_id):
+            pass  # completes instantly
+
+        mock_tqdm_module = MagicMock()
+        mock_hf_hub = MagicMock()
+        mock_hf_hub.snapshot_download = fast_download
+        mock_hf_hub_utils = MagicMock()
+        mock_hf_hub_utils._tqdm = mock_tqdm_module
+        mock_hf_hub_utils.tqdm = MagicMock
+
+        with patch.dict("sys.modules", {
+            "huggingface_hub": mock_hf_hub,
+            "huggingface_hub.utils": mock_hf_hub_utils,
+            "huggingface_hub.utils._tqdm": mock_tqdm_module,
+        }):
+            # Should not raise
+            _snapshot_download_with_stall_detection("org/model")
+
+
+# ---------------------------------------------------------------------------
+# ensure_model_downloaded (three-tier retry)
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureModelDownloaded:
+    def test_cached_model_skips_download(self) -> None:
+        """When model is already cached, no download occurs."""
+        from veery.stt import ensure_model_downloaded
+
+        callback = MagicMock()
+        with patch("veery.stt._is_model_cached", return_value=True):
+            ensure_model_downloaded("org/model", progress_callback=callback)
+
+        callback.assert_not_called()
+
+    def test_first_attempt_succeeds(self) -> None:
+        """When first attempt succeeds, no retries happen."""
+        from veery.stt import ensure_model_downloaded
+
+        callback = MagicMock()
+        with (
+            patch("veery.stt._is_model_cached", return_value=False),
+            patch("veery.stt._snapshot_download_with_stall_detection") as mock_sd,
+            patch("veery.stt._clean_incomplete_cache") as mock_clean,
+        ):
+            ensure_model_downloaded("org/model", progress_callback=callback)
+
+        mock_sd.assert_called_once_with("org/model", callback)
+        mock_clean.assert_not_called()
+        callback.assert_any_call(1.0, "Download complete")
+
+    def test_stall_triggers_xet_disabled_retry(self) -> None:
+        """When first attempt stalls, retries with HF_HUB_DISABLE_XET=1."""
+        from veery.stt import DownloadStalled, ensure_model_downloaded
+
+        callback = MagicMock()
+
+        call_count = {"n": 0}
+        def fake_stall_detect(repo_id, cb, *, env_override=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise DownloadStalled("stalled")
+            # Second call succeeds
+
+        with (
+            patch("veery.stt._is_model_cached", return_value=False),
+            patch("veery.stt._snapshot_download_with_stall_detection", side_effect=fake_stall_detect) as mock_sd,
+            patch("veery.stt._clean_incomplete_cache") as mock_clean,
+        ):
+            ensure_model_downloaded("org/model", progress_callback=callback)
+
+        assert mock_sd.call_count == 2
+        # Second call should have env_override for xet disable
+        second_call = mock_sd.call_args_list[1]
+        assert second_call.kwargs["env_override"] == {"HF_HUB_DISABLE_XET": "1"}
+        mock_clean.assert_called_once()
+        callback.assert_any_call(0.0, "Download stalled, retrying...")
+        callback.assert_any_call(1.0, "Download complete")
+
+    def test_both_stalls_trigger_curl_fallback(self) -> None:
+        """When both snapshot_download attempts stall, falls back to curl."""
+        from veery.stt import DownloadStalled, ensure_model_downloaded
+
+        callback = MagicMock()
+
+        with (
+            patch("veery.stt._is_model_cached", return_value=False),
+            patch("veery.stt._snapshot_download_with_stall_detection", side_effect=DownloadStalled("stalled")),
+            patch("veery.stt._clean_incomplete_cache") as mock_clean,
+            patch("veery.stt._curl_download_hf_model") as mock_curl,
+        ):
+            ensure_model_downloaded("org/model", progress_callback=callback)
+
+        assert mock_clean.call_count == 2
+        mock_curl.assert_called_once_with("org/model", callback)
+        callback.assert_any_call(0.0, "Retrying with direct download...")
         callback.assert_any_call(1.0, "Download complete")

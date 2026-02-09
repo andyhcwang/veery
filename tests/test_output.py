@@ -65,12 +65,14 @@ class TestPasteMethodSelection:
             paste_to_active_app("hi")  # no config passed
         mock_type.assert_called_once_with("hi")
 
-    def test_exception_is_caught(self) -> None:
-        """paste_to_active_app catches all exceptions and logs."""
+    def test_exception_propagates(self) -> None:
+        """paste_to_active_app lets exceptions propagate to the caller."""
+        import pytest
+
         with patch("veery.output._type_via_cgevent", side_effect=RuntimeError("CGEvent fail")):
             from veery.output import paste_to_active_app
-            # Should not raise
-            paste_to_active_app("hello")
+            with pytest.raises(RuntimeError, match="CGEvent fail"):
+                paste_to_active_app("hello")
 
 
 # ---------------------------------------------------------------------------

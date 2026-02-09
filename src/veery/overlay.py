@@ -2,8 +2,8 @@
 
 Shows a polished translucent pill at the top-center of the screen that
 doesn't steal focus from the active application. Features animated
-pulsing dot (recording), animated thinking dots (processing), and
-brief success flash.
+pulsing dot (recording), cycling ellipsis (processing), and brief
+success flash.
 
 Also provides PermissionGuideOverlay for first-launch onboarding.
 """
@@ -141,44 +141,34 @@ class _PillView:
                 elif self._mode == "success":
                     self._draw_success_dot(rect)
 
-            def _draw_recording_dot(self, rect):
-                """Draw a pulsing red dot on the left side."""
+            def _draw_dot(self, rect, r, g, b, a):
+                """Draw a colored dot on the left side of the pill."""
                 dot_size = 8
                 dot_x = 18
                 dot_y = (rect.size.height - dot_size) / 2
                 dot_rect = ((dot_x, dot_y), (dot_size, dot_size))
-                _NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    _RECORDING_DOT_RED,
-                    _RECORDING_DOT_GREEN,
-                    _RECORDING_DOT_BLUE,
-                    self._dot_alpha,
-                ).set()
+                _NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
                 _NSBezierPath.bezierPathWithOvalInRect_(dot_rect).fill()
+
+            def _draw_recording_dot(self, rect):
+                """Draw a pulsing red dot on the left side."""
+                self._draw_dot(
+                    rect,
+                    _RECORDING_DOT_RED, _RECORDING_DOT_GREEN, _RECORDING_DOT_BLUE,
+                    self._dot_alpha,
+                )
 
             def _draw_processing_dots(self, rect):
                 """Draw a single white dot on the left side during processing."""
-                dot_size = 8
-                dot_x = 18
-                dot_y = (rect.size.height - dot_size) / 2
-                dot_rect = ((dot_x, dot_y), (dot_size, dot_size))
-                _NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    1.0, 1.0, 1.0, 0.7
-                ).set()
-                _NSBezierPath.bezierPathWithOvalInRect_(dot_rect).fill()
+                self._draw_dot(rect, 1.0, 1.0, 1.0, 0.7)
 
             def _draw_success_dot(self, rect):
                 """Draw a green dot on the left side for success state."""
-                dot_size = 8
-                dot_x = 18
-                dot_y = (rect.size.height - dot_size) / 2
-                dot_rect = ((dot_x, dot_y), (dot_size, dot_size))
-                _NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    _SUCCESS_GREEN_RED,
-                    _SUCCESS_GREEN_GREEN,
-                    _SUCCESS_GREEN_BLUE,
+                self._draw_dot(
+                    rect,
+                    _SUCCESS_GREEN_RED, _SUCCESS_GREEN_GREEN, _SUCCESS_GREEN_BLUE,
                     1.0,
-                ).set()
-                _NSBezierPath.bezierPathWithOvalInRect_(dot_rect).fill()
+                )
 
             # --- NSTimer callbacks (ObjC selectors) ---
 
@@ -789,10 +779,12 @@ class DownloadProgressOverlay:
             fraction: Progress from 0.0 to 1.0.
             detail: Text shown below the title (e.g., "Downloading SenseVoice-Small (1.2 GB)...").
         """
+        clamped = max(0.0, min(fraction, 1.0))
+
         def _update():
             with self._lock:
                 if self._progress_view is not None:
-                    self._progress_view._fraction = fraction
+                    self._progress_view._fraction = clamped
                     self._progress_view.setNeedsDisplay_(True)
                 if self._detail_label is not None:
                     self._detail_label.setStringValue_(detail)

@@ -1,7 +1,7 @@
 """Audio capture with Silero VAD for speech endpoint detection.
 
 Uses sounddevice.InputStream with a real-time callback to capture 16kHz mono audio.
-Silero VAD v5 (via torch.hub) classifies each 100ms chunk as speech/silence.
+Silero VAD v5 (via torch.hub) classifies each 96ms chunk as speech/silence.
 A state machine tracks speech onset and offset to produce complete utterances.
 """
 

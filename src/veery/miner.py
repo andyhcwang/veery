@@ -84,16 +84,13 @@ def _expand_phonetic_variants(parts: list[str]) -> list[str]:
     options_per_part: list[list[str]] = []
     for part in parts:
         key = part.lower()
-        if key in _PHONETIC_SUBS:
-            options_per_part.append([part.lower()] + _PHONETIC_SUBS[key])
-        else:
-            options_per_part.append([part.lower()])
+        subs = _PHONETIC_SUBS.get(key)
+        options_per_part.append([key] + subs if subs else [key])
 
-    variants: list[str] = []
-    for combo in itertools.islice(itertools.product(*options_per_part), 8):
-        joined = " ".join(combo)
-        variants.append(joined)
-    return variants
+    return [
+        " ".join(combo)
+        for combo in itertools.islice(itertools.product(*options_per_part), 8)
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -132,10 +129,7 @@ def generate_variants(term: str) -> list[str]:
         variants.add(spaced)
 
     # Rule 4: Phonetic substitution on CamelCase parts
-    if len(parts) >= 1:
-        phonetic = _expand_phonetic_variants(parts)
-        for v in phonetic:
-            variants.add(v)
+    variants.update(_expand_phonetic_variants(parts))
 
     # Remove the canonical form for single-part terms (e.g. "twap" for "TWAP").
     # For multi-part CamelCase terms (e.g. "pytorch" for "PyTorch"), keep the
@@ -170,9 +164,7 @@ def _is_interesting_name(name: str) -> bool:
     """Check if a name looks like domain jargon (CamelCase or ALL_CAPS)."""
     if len(name) < 3:
         return False
-    if name.startswith("_"):
-        return False
-    if name.startswith("test") or name.startswith("Test"):
+    if name.startswith(("_", "test", "Test")):
         return False
     if name in {"setUp", "tearDown", "setUpClass", "tearDownClass"}:
         return False
@@ -199,12 +191,7 @@ def _extract_names_from_ast(source: str) -> list[str]:
             if _is_interesting_name(node.name):
                 names.append(node.name)
         # Import names
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                real_name = alias.asname or alias.name
-                if _is_interesting_name(real_name):
-                    names.append(real_name)
-        elif isinstance(node, ast.Import):
+        elif isinstance(node, (ast.ImportFrom, ast.Import)):
             for alias in node.names:
                 real_name = alias.asname or alias.name
                 if _is_interesting_name(real_name):
@@ -354,9 +341,11 @@ def write_mined_yaml(
         allow_unicode=True,
         sort_keys=False,
     )
-    with open(output_path, "w") as f:
+    tmp_path = output_path.with_suffix(".yaml.tmp")
+    with open(tmp_path, "w") as f:
         f.write(header)
         f.write(yaml_body)
+    tmp_path.replace(output_path)
 
     logger.info("Wrote %d new terms to %s", added, output_path)
     return added

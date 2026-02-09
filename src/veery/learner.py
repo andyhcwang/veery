@@ -1,4 +1,4 @@
-"""Auto-learning from user corrections via hotkey-based correction mode."""
+"""Auto-learning from user corrections via re-dictation detection."""
 
 from __future__ import annotations
 
@@ -15,12 +15,12 @@ logger = logging.getLogger(__name__)
 
 
 class CorrectionLearner:
-    """Learns jargon corrections from user-initiated correction mode.
+    """Learns jargon corrections from re-dictation within a time window.
 
-    After Veery pastes text, the user can press a correction hotkey to
-    re-dictate a correction. The learner computes the diff and tracks
-    (variant -> canonical) pairs. After `promotion_threshold` identical
-    corrections, the pair is auto-added to learned.yaml.
+    After Veery pastes text, if the user re-dictates similar text within
+    a short window, the learner treats the new text as a correction.
+    It tracks (variant -> canonical) pairs. After `promotion_threshold`
+    identical corrections, the pair is auto-added to learned.yaml.
     """
 
     def __init__(self, config: LearningConfig) -> None:

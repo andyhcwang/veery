@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 # Project root (two levels up from this file: src/veery/config.py → veery/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -96,20 +99,24 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     if not config_path.exists():
         return AppConfig()
 
-    with open(config_path) as f:
-        raw = yaml.safe_load(f) or {}
+    try:
+        with open(config_path) as f:
+            raw = yaml.safe_load(f) or {}
 
-    return AppConfig(
-        audio=AudioConfig(**raw.get("audio", {})),
-        vad=VADConfig(**raw.get("vad", {})),
-        stt=STTConfig(**raw.get("stt", {})),
-        jargon=JargonConfig(
-            **{
-                k: tuple(v) if k == "dict_paths" and isinstance(v, list) else v
-                for k, v in raw.get("jargon", {}).items()
-            }
-        ),
-        hotkey=HotkeyConfig(**raw.get("hotkey", {})),
-        output=OutputConfig(**raw.get("output", {})),
-        learning=LearningConfig(**raw.get("learning", {})),
-    )
+        return AppConfig(
+            audio=AudioConfig(**raw.get("audio", {})),
+            vad=VADConfig(**raw.get("vad", {})),
+            stt=STTConfig(**raw.get("stt", {})),
+            jargon=JargonConfig(
+                **{
+                    k: tuple(v) if k == "dict_paths" and isinstance(v, list) else v
+                    for k, v in raw.get("jargon", {}).items()
+                }
+            ),
+            hotkey=HotkeyConfig(**raw.get("hotkey", {})),
+            output=OutputConfig(**raw.get("output", {})),
+            learning=LearningConfig(**raw.get("learning", {})),
+        )
+    except Exception:
+        logger.warning("Failed to parse %s, using defaults", config_path, exc_info=True)
+        return AppConfig()

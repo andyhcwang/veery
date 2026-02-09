@@ -13,7 +13,7 @@ import webbrowser
 import rumps
 
 from veery import __version__, sounds
-from veery.audio import AudioRecorder
+from veery.audio import AudioRecorder, AudioSegment
 from veery.config import PROJECT_ROOT, STT_BACKENDS, AppConfig, load_config
 from veery.corrector import TextCorrector
 from veery.jargon import JargonCorrector
@@ -131,6 +131,7 @@ class VeeryApp(rumps.App):
         # Progressive loading: tracks background Whisper download
         self._whisper_loading: bool = False
         self._whisper_download_cancelled: bool = False
+        self._stt_switching: bool = False
 
         self._permission_overlay = PermissionGuideOverlay()
 
@@ -140,7 +141,7 @@ class VeeryApp(rumps.App):
         """Lightweight init — create objects without loading heavy models."""
         logger.info("Initializing Veery components...")
 
-        # 1. Audio recorder (VAD loaded lazily on first recording)
+        # 1. Audio recorder (VAD loaded eagerly in _load_models)
         try:
             self._recorder = AudioRecorder(self._config.audio, self._config.vad)
             logger.info("AudioRecorder initialized")
@@ -183,6 +184,34 @@ class VeeryApp(rumps.App):
         self._detail_item.title = "Loading models..."
         threading.Thread(target=self._load_models, daemon=True).start()
 
+    def _download_sensevoice_with_overlay(
+        self,
+        model_name: str,
+    ) -> DownloadProgressOverlay | None:
+        """Download SenseVoice if not cached, showing a progress overlay.
+
+        Returns the overlay (still visible) so the caller can hide it,
+        or None if no download was needed.
+        """
+        if _is_sensevoice_cached(model_name):
+            self._detail_item.title = "Loading SenseVoice..."
+            return None
+
+        overlay = DownloadProgressOverlay()
+        overlay.show()
+        self._detail_item.title = "Downloading SenseVoice..."
+
+        def _on_progress(fraction: float, detail: str) -> None:
+            overlay.set_progress(fraction, detail)
+
+        try:
+            ensure_sensevoice_downloaded(model_name, progress_callback=_on_progress)
+        except Exception:
+            overlay.hide()
+            raise
+        overlay.set_progress(1.0, "Loading model into memory...")
+        return overlay
+
     def _load_models(self) -> None:
         """Background thread: download/load heavy models with menubar status.
 
@@ -220,18 +249,7 @@ class VeeryApp(rumps.App):
                 # Progressive path: load SenseVoice first, then Whisper in background
                 from dataclasses import replace
 
-                if not _is_sensevoice_cached(stt_cfg.model_name):
-                    download_overlay = DownloadProgressOverlay()
-                    download_overlay.show()
-                    self._detail_item.title = "Downloading SenseVoice..."
-
-                    def _sv_progress(fraction: float, detail: str) -> None:
-                        if download_overlay is not None:
-                            download_overlay.set_progress(fraction, detail)
-
-                    ensure_sensevoice_downloaded(stt_cfg.model_name, progress_callback=_sv_progress)
-                    if download_overlay is not None:
-                        download_overlay.set_progress(1.0, "Loading model into memory...")
+                download_overlay = self._download_sensevoice_with_overlay(stt_cfg.model_name)
 
                 self._detail_item.title = "Loading SenseVoice..."
                 sv_config = replace(stt_cfg, backend="sensevoice")
@@ -256,21 +274,7 @@ class VeeryApp(rumps.App):
 
             else:
                 # SenseVoice backend: download with overlay if needed, then load
-                if not _is_sensevoice_cached(stt_cfg.model_name):
-                    download_overlay = DownloadProgressOverlay()
-                    download_overlay.show()
-                    self._detail_item.title = "Downloading SenseVoice..."
-
-                    def _sv_progress2(fraction: float, detail: str) -> None:
-                        if download_overlay is not None:
-                            download_overlay.set_progress(fraction, detail)
-
-                    ensure_sensevoice_downloaded(stt_cfg.model_name, progress_callback=_sv_progress2)
-                    if download_overlay is not None:
-                        download_overlay.set_progress(1.0, "Loading model into memory...")
-                else:
-                    self._detail_item.title = "Loading SenseVoice..."
-
+                download_overlay = self._download_sensevoice_with_overlay(stt_cfg.model_name)
                 self._stt = create_stt(stt_cfg)
                 logger.info("STT loaded (backend=sensevoice)")
 
@@ -300,8 +304,11 @@ class VeeryApp(rumps.App):
         self._whisper_loading = True
         try:
             def _progress(fraction: float, detail: str) -> None:
-                pct = int(fraction * 100)
-                self._detail_item.title = f"Ready (Whisper: {pct}%)"
+                if "stalled" in detail.lower() or "retrying" in detail.lower():
+                    self._detail_item.title = f"Ready ({detail})"
+                else:
+                    pct = int(fraction * 100)
+                    self._detail_item.title = f"Ready (Whisper: {pct}%)"
 
             ensure_model_downloaded(stt_cfg.whisper_model, progress_callback=_progress)
             self._detail_item.title = "Ready (loading Whisper...)"
@@ -330,7 +337,7 @@ class VeeryApp(rumps.App):
             item.state = 1 if bid == backend_id else 0
 
     def _start_hotkey_listener(self) -> None:
-        """Start push-to-talk listener: hold right Cmd to record, release to process."""
+        """Start hotkey listener: right Cmd triggers recording (hold or toggle mode)."""
         try:
             from pynput.keyboard import Key, Listener
 
@@ -502,7 +509,7 @@ class VeeryApp(rumps.App):
         worker = threading.Thread(target=self._process_segment, args=(segment,), daemon=True)
         worker.start()
 
-    def _process_segment(self, segment) -> None:
+    def _process_segment(self, segment: AudioSegment) -> None:
         """Process a captured audio segment: STT -> correct -> paste.
 
         Note: state is already PROCESSING (set by _stop_recording before
@@ -523,23 +530,17 @@ class VeeryApp(rumps.App):
 
             logger.info("Transcribed: %s", raw_text)
 
-            if self._corrector is None:
-                self._try_auto_learn(raw_text)
-                paste_to_active_app(raw_text, self._config.output)
-                self._last_pasted_text = raw_text
-                self._last_pasted_time = time.monotonic()
-                self._session_count += 1
-                success = True
-                return
+            # Run correction pipeline if available, otherwise use raw text
+            if self._corrector is not None:
+                result = self._corrector.correct(raw_text)
+                final_text = result.final
+                logger.info("Final text: %s", final_text)
+            else:
+                final_text = raw_text
 
-            result = self._corrector.correct(raw_text)
-            logger.info("Final text: %s", result.final)
-
-            # Auto-learn: if re-dictated within window, treat as correction
-            self._try_auto_learn(result.final)
-
-            paste_to_active_app(result.final, self._config.output)
-            self._last_pasted_text = result.final
+            self._try_auto_learn(final_text)
+            paste_to_active_app(final_text, self._config.output)
+            self._last_pasted_text = final_text
             self._last_pasted_time = time.monotonic()
             self._session_count += 1
             success = True
@@ -603,11 +604,21 @@ class VeeryApp(rumps.App):
         if backend_id == self._stt_backend and self._stt is not None:
             return  # already active
 
-        # Cancel auto-switch if Whisper is downloading in background
         if self._whisper_loading:
+            if backend_id == "whisper":
+                # Whisper is already downloading in background — let it auto-switch
+                self._whisper_download_cancelled = False
+                self._detail_item.title = "Downloading Whisper..."
+                logger.info("Whisper already downloading, will auto-switch on completion")
+                return
+            # Switching away from whisper while it's downloading
             self._whisper_download_cancelled = True
 
-        self._update_stt_checkmarks(backend_id)
+        if self._stt_switching:
+            logger.info("STT switch already in progress, ignoring click for %s", backend_id)
+            return
+
+        self._stt_switching = True
         self._detail_item.title = "Switching STT model..."
         logger.info("User selected STT backend: %s", backend_id)
 
@@ -618,11 +629,14 @@ class VeeryApp(rumps.App):
                 new_stt = create_stt(new_config)
                 self._stt = new_stt
                 self._stt_backend = backend_id
+                self._update_stt_checkmarks(backend_id)
                 self._detail_item.title = "Ready"
                 logger.info("STT backend switched to %s", backend_id)
             except Exception:
                 logger.exception("Failed to switch STT backend to %s", backend_id)
                 self._detail_item.title = "Ready (STT switch failed)"
+            finally:
+                self._stt_switching = False
 
         threading.Thread(target=_switch, daemon=True).start()
 

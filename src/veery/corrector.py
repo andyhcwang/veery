@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Filler words/phrases to remove (case-insensitive, word-boundary-aware).
 # Combined into a single alternation regex for one-pass removal instead
-# of iterating 12 separate patterns sequentially.
+# of iterating 15 separate patterns sequentially.
 _EN_FILLERS = [
     r"\bum\b", r"\buh\b", r"\bumm\b", r"\buhh\b",
     r"\byou know\b", r"\bI mean\b",

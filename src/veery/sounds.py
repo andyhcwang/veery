@@ -1,6 +1,6 @@
 """Subtle audio feedback for recording start/stop.
 
-Generates short, warm tones at import time and plays them via NSSound.
+Generates short, warm tones lazily on first use and plays them via NSSound.
 Tones are custom (not macOS system sounds) to avoid confusion with
 system alerts. Designed to be soft, non-jarring, and under 100ms.
 """
@@ -92,6 +92,7 @@ def _load_sounds() -> None:
         _loaded = True
         logger.debug("Audio feedback sounds loaded")
     except Exception:
+        _loaded = True  # prevent repeated retries on unsupported environments
         logger.debug("Could not load audio feedback sounds")
 
 

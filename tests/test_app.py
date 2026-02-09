@@ -476,7 +476,8 @@ class TestSTTBackendSwitch:
             mock_thread.return_value = mock_instance
             app._on_select_stt_backend("whisper", None)
 
-        assert app._stt_backend == "whisper"
+        # Backend only updates after the switch thread completes (no race)
+        assert app._stt_backend == "sensevoice"
         mock_instance.start.assert_called_once()
 
     def test_switch_cancels_whisper_download(self, app) -> None:
@@ -488,3 +489,15 @@ class TestSTTBackendSwitch:
             app._on_select_stt_backend("sensevoice", None)
 
         assert app._whisper_download_cancelled is True
+
+    def test_select_whisper_while_downloading_lets_background_finish(self, app) -> None:
+        app._whisper_loading = True
+        app._whisper_download_cancelled = True  # was previously cancelled
+        app._stt_backend = "sensevoice"
+
+        with patch("veery.app.threading.Thread") as mock_thread:
+            app._on_select_stt_backend("whisper", None)
+
+        # Should NOT spawn a new thread — let the background download auto-switch
+        mock_thread.assert_not_called()
+        assert app._whisper_download_cancelled is False
