@@ -36,6 +36,8 @@ uv run ruff check src/ tests/    # lint
 - `prepare_stream()` opens audio immediately on hotkey press for zero-latency capture
 - Pre-speech buffer: 500ms ring buffer captures speech onset before VAD triggers
 - Thread safety: `_state_lock` protects state machine transitions
+- **CRITICAL**: Silero VAD requires exactly 512 samples (32ms at 16kHz) per chunk - do not change `chunk_duration_ms` from 32
+- Input gain boosting: quiet microphones (USB/Bluetooth) may need `input_gain: 5.0-10.0` in config.yaml
 
 ## Code Style
 - Python 3.13, ruff for linting

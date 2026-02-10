@@ -53,6 +53,13 @@ def overlay_with_panel(mock_appkit):
     return overlay
 
 
+def _patch_run_on_main_sync():
+    """Return a patch context that makes _run_on_main execute blocks synchronously."""
+    def run_sync(block):
+        block()
+    return patch("veery.overlay._run_on_main", side_effect=run_sync)
+
+
 class TestOverlayIndicator:
     """Tests for OverlayIndicator public API."""
 
@@ -85,25 +92,25 @@ class TestOverlayIndicator:
 
     def test_show_recording_dispatches_to_main(self, overlay_with_panel):
         """show_recording dispatches work to main thread via callAfter."""
-        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay._run_on_main") as mock_run:
             overlay_with_panel.show_recording()
             mock_run.assert_called_once()
 
     def test_show_processing_dispatches_to_main(self, overlay_with_panel):
         """show_processing dispatches work to main thread via callAfter."""
-        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay._run_on_main") as mock_run:
             overlay_with_panel.show_processing()
             mock_run.assert_called_once()
 
     def test_show_success_dispatches_to_main(self, overlay_with_panel):
         """show_success dispatches work to main thread via callAfter."""
-        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay._run_on_main") as mock_run:
             overlay_with_panel.show_success()
             mock_run.assert_called_once()
 
     def test_hide_dispatches_to_main(self, overlay_with_panel):
         """hide dispatches work to main thread via callAfter."""
-        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay._run_on_main") as mock_run:
             overlay_with_panel.hide()
             mock_run.assert_called_once()
 
@@ -129,79 +136,54 @@ class TestOverlayIndicator:
 
     def test_show_recording_calls_block_directly(self, mock_appkit, overlay_with_panel):
         """When _run_on_main executes the block synchronously, it updates state."""
-        # Make _run_on_main execute the block immediately
-        def run_sync(block):
-            block()
+        with _patch_run_on_main_sync():
+            overlay_with_panel.show_recording()
 
-        overlay = overlay_with_panel
-        overlay._run_on_main = run_sync
-        overlay.show_recording()
-
-        overlay._label.setStringValue_.assert_called_with("Listening")
-        overlay._pill_view.setNeedsDisplay_.assert_called_with(True)
-        overlay._panel.orderFrontRegardless.assert_called()
-        assert overlay._pill_view._mode == "recording"
+        overlay_with_panel._label.setStringValue_.assert_called_with("Listening")
+        overlay_with_panel._pill_view.setNeedsDisplay_.assert_called_with(True)
+        overlay_with_panel._panel.orderFrontRegardless.assert_called()
+        assert overlay_with_panel._pill_view._mode == "recording"
 
     def test_show_processing_calls_block_directly(self, mock_appkit, overlay_with_panel):
         """When _run_on_main executes synchronously, processing state is set."""
-        def run_sync(block):
-            block()
+        with _patch_run_on_main_sync():
+            overlay_with_panel.show_processing()
 
-        overlay = overlay_with_panel
-        overlay._run_on_main = run_sync
-        overlay.show_processing()
-
-        overlay._label.setStringValue_.assert_called_with("Processing")
-        overlay._pill_view.setNeedsDisplay_.assert_called_with(True)
-        overlay._panel.orderFrontRegardless.assert_called()
-        assert overlay._pill_view._mode == "processing"
+        overlay_with_panel._label.setStringValue_.assert_called_with("Processing")
+        overlay_with_panel._pill_view.setNeedsDisplay_.assert_called_with(True)
+        overlay_with_panel._panel.orderFrontRegardless.assert_called()
+        assert overlay_with_panel._pill_view._mode == "processing"
 
     def test_show_success_calls_block_directly(self, mock_appkit, overlay_with_panel):
         """When _run_on_main executes synchronously, success state is set."""
-        def run_sync(block):
-            block()
+        with _patch_run_on_main_sync():
+            overlay_with_panel.show_success()
 
-        overlay = overlay_with_panel
-        overlay._run_on_main = run_sync
-        overlay.show_success()
-
-        overlay._label.setStringValue_.assert_called_with("Done")
-        overlay._pill_view.setNeedsDisplay_.assert_called_with(True)
-        overlay._panel.orderFrontRegardless.assert_called()
-        assert overlay._pill_view._mode == "success"
+        overlay_with_panel._label.setStringValue_.assert_called_with("Done")
+        overlay_with_panel._pill_view.setNeedsDisplay_.assert_called_with(True)
+        overlay_with_panel._panel.orderFrontRegardless.assert_called()
+        assert overlay_with_panel._pill_view._mode == "success"
 
     def test_hide_calls_fade_out(self, mock_appkit, overlay_with_panel):
         """When _run_on_main executes synchronously, hide fades out."""
-        def run_sync(block):
-            block()
-
-        overlay = overlay_with_panel
-        overlay._run_on_main = run_sync
-        with patch.object(overlay, "_fade_out") as mock_fade:
-            overlay.hide()
+        with _patch_run_on_main_sync(), \
+             patch.object(overlay_with_panel, "_fade_out") as mock_fade:
+            overlay_with_panel.hide()
             mock_fade.assert_called_once()
 
     def test_show_recording_stops_existing_timers(self, mock_appkit, overlay_with_panel):
         """show_recording stops any running timers before starting new ones."""
-        def run_sync(block):
-            block()
-
         old_timer = MagicMock()
-        overlay = overlay_with_panel
-        overlay._animation_timer = old_timer
-        overlay._run_on_main = run_sync
-        overlay.show_recording()
+        overlay_with_panel._animation_timer = old_timer
+        with _patch_run_on_main_sync():
+            overlay_with_panel.show_recording()
 
         old_timer.invalidate.assert_called_once()
 
     def test_show_recording_starts_pulse_timer(self, mock_appkit, overlay_with_panel):
         """show_recording starts an NSTimer for pulse animation."""
-        def run_sync(block):
-            block()
-
-        overlay = overlay_with_panel
-        overlay._run_on_main = run_sync
-        overlay.show_recording()
+        with _patch_run_on_main_sync():
+            overlay_with_panel.show_recording()
 
         mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_called_once()
         call_args = mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args
@@ -211,12 +193,8 @@ class TestOverlayIndicator:
 
     def test_show_processing_starts_cycle_timer(self, mock_appkit, overlay_with_panel):
         """show_processing starts an NSTimer for dot cycling."""
-        def run_sync(block):
-            block()
-
-        overlay = overlay_with_panel
-        overlay._run_on_main = run_sync
-        overlay.show_processing()
+        with _patch_run_on_main_sync():
+            overlay_with_panel.show_processing()
 
         mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_called_once()
         call_args = mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args
@@ -226,12 +204,8 @@ class TestOverlayIndicator:
 
     def test_show_success_starts_hide_timer(self, mock_appkit, overlay_with_panel):
         """show_success starts an NSTimer that auto-hides after 1200ms."""
-        def run_sync(block):
-            block()
-
-        overlay = overlay_with_panel
-        overlay._run_on_main = run_sync
-        overlay.show_success()
+        with _patch_run_on_main_sync():
+            overlay_with_panel.show_success()
 
         mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_called_once()
         call_args = mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args
@@ -241,10 +215,11 @@ class TestOverlayIndicator:
 
     def test_run_on_main_handles_import_error(self):
         """_run_on_main logs exception if callAfter import fails."""
-        overlay = OverlayIndicator()
+        from veery.overlay import _run_on_main
+
         with patch("veery.overlay.logger") as mock_logger:
             with patch.dict("sys.modules", {"PyObjCTools": None, "PyObjCTools.AppHelper": None}):
-                overlay._run_on_main(lambda: None)
+                _run_on_main(lambda: None)
             mock_logger.exception.assert_called()
 
     def test_ensure_panel_returns_false_when_no_screen(self, mock_appkit):
@@ -255,32 +230,24 @@ class TestOverlayIndicator:
 
     def test_show_warning_dispatches_to_main(self, overlay_with_panel):
         """show_warning dispatches work to main thread via callAfter."""
-        with patch("veery.overlay.OverlayIndicator._run_on_main") as mock_run:
+        with patch("veery.overlay._run_on_main") as mock_run:
             overlay_with_panel.show_warning("No speech detected")
             mock_run.assert_called_once()
 
     def test_show_warning_calls_block_directly(self, mock_appkit, overlay_with_panel):
         """When _run_on_main executes synchronously, warning state is set."""
-        def run_sync(block):
-            block()
+        with _patch_run_on_main_sync():
+            overlay_with_panel.show_warning("No speech detected")
 
-        overlay = overlay_with_panel
-        overlay._run_on_main = run_sync
-        overlay.show_warning("No speech detected")
-
-        overlay._label.setStringValue_.assert_called_with("No speech detected")
-        overlay._pill_view.setNeedsDisplay_.assert_called_with(True)
-        overlay._panel.orderFrontRegardless.assert_called()
-        assert overlay._pill_view._mode is None  # no dot for warnings
+        overlay_with_panel._label.setStringValue_.assert_called_with("No speech detected")
+        overlay_with_panel._pill_view.setNeedsDisplay_.assert_called_with(True)
+        overlay_with_panel._panel.orderFrontRegardless.assert_called()
+        assert overlay_with_panel._pill_view._mode is None  # no dot for warnings
 
     def test_show_warning_starts_auto_hide_timer(self, mock_appkit, overlay_with_panel):
         """show_warning starts an NSTimer that auto-hides after 1.5s."""
-        def run_sync(block):
-            block()
-
-        overlay = overlay_with_panel
-        overlay._run_on_main = run_sync
-        overlay.show_warning("Test warning")
+        with _patch_run_on_main_sync():
+            overlay_with_panel.show_warning("Test warning")
 
         mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_called_once()
         call_args = mock_appkit._NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args
@@ -290,12 +257,9 @@ class TestOverlayIndicator:
 
     def test_hide_noop_when_no_panel(self):
         """hide() is safe to call when panel is None."""
-        def run_sync(block):
-            block()
-
         overlay = OverlayIndicator()
-        overlay._run_on_main = run_sync
-        overlay.hide()  # should not raise
+        with _patch_run_on_main_sync():
+            overlay.hide()  # should not raise
 
 
 class TestOverlayConstants:

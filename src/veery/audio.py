@@ -1,7 +1,7 @@
 """Audio capture with Silero VAD for speech endpoint detection.
 
 Uses sounddevice.InputStream with a real-time callback to capture 16kHz mono audio.
-Silero VAD v5 (via torch.hub) classifies each 96ms chunk as speech/silence.
+Silero VAD v5 (via torch.hub) classifies each 32ms chunk as speech/silence.
 A state machine tracks speech onset and offset to produce complete utterances.
 """
 
@@ -224,8 +224,8 @@ class AudioRecorder:
     ) -> None:
         """Called by sounddevice for each audio chunk.
 
-        MUST be fast: no allocations beyond the chunk copy, no logging,
-        no I/O. VAD inference is ~0.1ms on CPU, well within budget.
+        MUST be fast: minimal allocations (chunk copy + in-place gain),
+        no logging, no I/O. VAD inference is ~0.1ms on CPU, well within budget.
         """
         if status:
             # Overflow or underflow — nothing we can do in real-time
@@ -233,6 +233,11 @@ class AudioRecorder:
 
         # Copy the chunk (indata buffer is reused by sounddevice)
         chunk = indata[:, 0].copy()
+
+        # Apply input gain if configured (for quiet microphones)
+        if self._audio_cfg.input_gain != 1.0:
+            np.multiply(chunk, self._audio_cfg.input_gain, out=chunk)
+            np.clip(chunk, -1.0, 1.0, out=chunk)  # Clamp to valid audio range
 
         # Run VAD on the chunk — wrapped in try/except because an unhandled
         # exception in a sounddevice callback silently kills the stream.
@@ -299,9 +304,10 @@ class AudioRecorder:
         """
         with self._lock:
             source = self._buffer
-            if not source and use_raw:
-                # Manual stop: use raw buffer as fallback, but only if it
-                # contains meaningful audio (not just ambient noise).
+            if not source and use_raw and self._state != _State.WAITING:
+                # Manual stop: use raw buffer as fallback, but only if VAD
+                # detected speech at some point (not just ambient noise).
+                # Skip when state is WAITING — user released without speaking.
                 raw_audio = list(self._raw_buffer)
                 if raw_audio:
                     combined = np.concatenate(raw_audio)
