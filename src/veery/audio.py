@@ -304,9 +304,10 @@ class AudioRecorder:
         """
         with self._lock:
             source = self._buffer
-            if not source and use_raw:
-                # Manual stop: use raw buffer as fallback, but only if it
-                # contains meaningful audio (not just ambient noise).
+            if not source and use_raw and self._state != _State.WAITING:
+                # Manual stop: use raw buffer as fallback, but only if VAD
+                # detected speech at some point (not just ambient noise).
+                # Skip when state is WAITING — user released without speaking.
                 raw_audio = list(self._raw_buffer)
                 if raw_audio:
                     combined = np.concatenate(raw_audio)
