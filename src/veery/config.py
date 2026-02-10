@@ -18,8 +18,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 class AudioConfig:
     sample_rate: int = 16000
     channels: int = 1
-    chunk_duration_ms: int = 96  # 96ms chunks → 1536 samples at 16kHz (Silero VAD supported size)
+    chunk_duration_ms: int = 32  # 32ms chunks → 512 samples at 16kHz (Silero VAD required size)
     max_duration_sec: float = 30.0  # Max recording length before auto-stop
+    input_gain: float = 1.0  # Multiplier for input audio (increase for quiet microphones)
 
     @property
     def chunk_samples(self) -> int:

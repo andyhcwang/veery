@@ -221,6 +221,24 @@ class OverlayIndicator:
         self._success_timer = None
         _overlay_ref = self
 
+    def _get_active_screen(self):
+        """Get the screen where the user is currently working (follows mouse cursor)."""
+        import AppKit
+
+        # Get mouse location and find the screen containing it
+        mouse_loc = AppKit.NSEvent.mouseLocation()
+        screens = _NSScreen.screens()
+
+        for screen in screens:
+            frame = screen.frame()
+            # NSScreen coordinates have origin at bottom-left
+            if (frame.origin.x <= mouse_loc.x < frame.origin.x + frame.size.width and
+                frame.origin.y <= mouse_loc.y < frame.origin.y + frame.size.height):
+                return screen
+
+        # Fallback to main screen if mouse not found on any screen
+        return _NSScreen.mainScreen()
+
     def _ensure_panel(self) -> bool:
         """Create the panel lazily on first use. Must be called from main thread."""
         if self._panel is not None:
@@ -232,13 +250,13 @@ class OverlayIndicator:
         try:
             import AppKit  # noqa: F401
 
-            screen = _NSScreen.mainScreen()
+            screen = self._get_active_screen()
             if screen is None:
                 return False
             screen_frame = screen.frame()
 
-            x = (screen_frame.size.width - _PILL_WIDTH) / 2
-            y = screen_frame.size.height - _PILL_HEIGHT - _PILL_TOP_OFFSET
+            x = screen_frame.origin.x + (screen_frame.size.width - _PILL_WIDTH) / 2
+            y = screen_frame.origin.y + screen_frame.size.height - _PILL_HEIGHT - _PILL_TOP_OFFSET
             frame = ((x, y), (_PILL_WIDTH, _PILL_HEIGHT))
 
             panel = _NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -335,10 +353,24 @@ class OverlayIndicator:
             self._success_timer.invalidate()
             self._success_timer = None
 
+    def _reposition_panel(self) -> None:
+        """Update panel position to follow the active screen. Must be called from main thread."""
+        if self._panel is None:
+            return
+        screen = self._get_active_screen()
+        if screen is None:
+            return
+        screen_frame = screen.frame()
+        x = screen_frame.origin.x + (screen_frame.size.width - _PILL_WIDTH) / 2
+        y = screen_frame.origin.y + screen_frame.size.height - _PILL_HEIGHT - _PILL_TOP_OFFSET
+        self._panel.setFrameOrigin_((x, y))
+
     def _fade_in(self) -> None:
         """Fade the panel in. Must be called from main thread."""
         if self._panel is None:
             return
+        # Reposition to follow active screen before showing
+        self._reposition_panel()
         _NSAnimationContext.beginGrouping()
         _NSAnimationContext.currentContext().setDuration_(0.15)
         self._panel.animator().setAlphaValue_(1.0)
@@ -599,6 +631,21 @@ class DownloadProgressOverlay:
         self._tips_timer = None
         self._tips_index = 0
 
+    def _get_active_screen(self):
+        """Get the screen where the user is currently working (follows mouse cursor)."""
+        import AppKit
+
+        mouse_loc = AppKit.NSEvent.mouseLocation()
+        screens = _NSScreen.screens()
+
+        for screen in screens:
+            frame = screen.frame()
+            if (frame.origin.x <= mouse_loc.x < frame.origin.x + frame.size.width and
+                frame.origin.y <= mouse_loc.y < frame.origin.y + frame.size.height):
+                return screen
+
+        return _NSScreen.mainScreen()
+
     def _ensure_panel(self) -> bool:
         """Create the panel lazily. Must be called from main thread."""
         if self._panel is not None:
@@ -610,13 +657,13 @@ class DownloadProgressOverlay:
         try:
             import AppKit  # noqa: F401
 
-            screen = _NSScreen.mainScreen()
+            screen = self._get_active_screen()
             if screen is None:
                 return False
             screen_frame = screen.frame()
 
-            x = (screen_frame.size.width - _DL_WIDTH) / 2
-            y = (screen_frame.size.height - _DL_HEIGHT) / 2
+            x = screen_frame.origin.x + (screen_frame.size.width - _DL_WIDTH) / 2
+            y = screen_frame.origin.y + (screen_frame.size.height - _DL_HEIGHT) / 2
             frame = ((x, y), (_DL_WIDTH, _DL_HEIGHT))
 
             panel = _NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -717,6 +764,18 @@ class DownloadProgressOverlay:
             self._tips_timer.invalidate()
             self._tips_timer = None
 
+    def _reposition_panel(self) -> None:
+        """Update panel position to follow the active screen. Must be called from main thread."""
+        if self._panel is None:
+            return
+        screen = self._get_active_screen()
+        if screen is None:
+            return
+        screen_frame = screen.frame()
+        x = screen_frame.origin.x + (screen_frame.size.width - _DL_WIDTH) / 2
+        y = screen_frame.origin.y + (screen_frame.size.height - _DL_HEIGHT) / 2
+        self._panel.setFrameOrigin_((x, y))
+
     def _cycle_tips(self) -> None:
         """Advance to the next tip. Called from main thread by NSTimer."""
         self._tips_index = (self._tips_index + 1) % len(_TIPS)
@@ -730,6 +789,7 @@ class DownloadProgressOverlay:
                 if not self._ensure_panel():
                     return
                 self._stop_timers()
+                self._reposition_panel()
                 self._tips_index = 0
                 if self._tips_label is not None:
                     self._tips_label.setStringValue_(_TIPS[0])
@@ -954,6 +1014,21 @@ class PermissionGuideOverlay:
         # Which steps actually need to be shown (indices into _PERM_STEPS)
         self._pending_steps: list[int] = []
 
+    def _get_active_screen(self):
+        """Get the screen where the user is currently working (follows mouse cursor)."""
+        import AppKit
+
+        mouse_loc = AppKit.NSEvent.mouseLocation()
+        screens = _NSScreen.screens()
+
+        for screen in screens:
+            frame = screen.frame()
+            if (frame.origin.x <= mouse_loc.x < frame.origin.x + frame.size.width and
+                frame.origin.y <= mouse_loc.y < frame.origin.y + frame.size.height):
+                return screen
+
+        return _NSScreen.mainScreen()
+
     def _ensure_panel(self) -> bool:
         """Create the panel lazily. Must be called from main thread."""
         if self._panel is not None:
@@ -965,13 +1040,13 @@ class PermissionGuideOverlay:
         try:
             import AppKit  # noqa: F401
 
-            screen = _NSScreen.mainScreen()
+            screen = self._get_active_screen()
             if screen is None:
                 return False
             screen_frame = screen.frame()
 
-            x = (screen_frame.size.width - _PERM_WIDTH) / 2
-            y = (screen_frame.size.height - _PERM_HEIGHT) / 2
+            x = screen_frame.origin.x + (screen_frame.size.width - _PERM_WIDTH) / 2
+            y = screen_frame.origin.y + (screen_frame.size.height - _PERM_HEIGHT) / 2
             frame = ((x, y), (_PERM_WIDTH, _PERM_HEIGHT))
 
             panel = _NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -1063,6 +1138,18 @@ class PermissionGuideOverlay:
         if self._poll_timer is not None:
             self._poll_timer.invalidate()
             self._poll_timer = None
+
+    def _reposition_panel(self) -> None:
+        """Update panel position to follow the active screen. Must be called from main thread."""
+        if self._panel is None:
+            return
+        screen = self._get_active_screen()
+        if screen is None:
+            return
+        screen_frame = screen.frame()
+        x = screen_frame.origin.x + (screen_frame.size.width - _PERM_WIDTH) / 2
+        y = screen_frame.origin.y + (screen_frame.size.height - _PERM_HEIGHT) / 2
+        self._panel.setFrameOrigin_((x, y))
 
     def _update_step_content(self) -> None:
         """Update panel text for the current step. Must be called from main thread."""
@@ -1160,6 +1247,7 @@ class PermissionGuideOverlay:
                     return
 
                 self._update_step_content()
+                self._reposition_panel()
                 self._panel.orderFrontRegardless()
                 self._fade_in()
 

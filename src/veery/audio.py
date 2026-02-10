@@ -234,6 +234,12 @@ class AudioRecorder:
         # Copy the chunk (indata buffer is reused by sounddevice)
         chunk = indata[:, 0].copy()
 
+        # Apply input gain if configured (for quiet microphones)
+        if self._audio_cfg.input_gain != 1.0:
+            chunk = chunk * self._audio_cfg.input_gain
+            # Clip to prevent overflow
+            chunk = np.clip(chunk, -1.0, 1.0)
+
         # Run VAD on the chunk — wrapped in try/except because an unhandled
         # exception in a sounddevice callback silently kills the stream.
         try:
