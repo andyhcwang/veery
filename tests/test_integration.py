@@ -174,7 +174,7 @@ class TestConfigLoadsDefaults:
         assert isinstance(config.audio, AudioConfig)
         assert config.audio.sample_rate == 16000
         assert config.audio.channels == 1
-        assert config.audio.chunk_duration_ms == 96
+        assert config.audio.chunk_duration_ms == 32
         assert config.audio.max_duration_sec == 30.0
 
         assert isinstance(config.vad, VADConfig)
@@ -198,8 +198,8 @@ class TestConfigLoadsDefaults:
     def test_audio_config_properties(self) -> None:
         """Verify computed properties on AudioConfig."""
         audio = AudioConfig()
-        # chunk_samples = 16000 * 96 / 1000 = 1536
-        assert audio.chunk_samples == 1536
+        # chunk_samples = 16000 * 32 / 1000 = 512
+        assert audio.chunk_samples == 512
         # max_buffer_samples = 16000 * 30 = 480000
         assert audio.max_buffer_samples == 480000
 

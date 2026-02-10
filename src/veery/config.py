@@ -104,7 +104,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         with open(config_path) as f:
             raw = yaml.safe_load(f) or {}
 
-        return AppConfig(
+        cfg = AppConfig(
             audio=AudioConfig(**raw.get("audio", {})),
             vad=VADConfig(**raw.get("vad", {})),
             stt=STTConfig(**raw.get("stt", {})),
@@ -118,6 +118,20 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             output=OutputConfig(**raw.get("output", {})),
             learning=LearningConfig(**raw.get("learning", {})),
         )
+
+        # Validate input_gain
+        gain = cfg.audio.input_gain
+        if not isinstance(gain, (int, float)) or gain <= 0:
+            logger.warning("input_gain must be a positive number (got %r), resetting to 1.0", gain)
+            audio_kwargs = {k: v for k, v in vars(cfg.audio).items() if k != "input_gain"}
+            audio_kwargs["input_gain"] = 1.0
+            cfg = AppConfig(audio=AudioConfig(**audio_kwargs), vad=cfg.vad, stt=cfg.stt,
+                            jargon=cfg.jargon, hotkey=cfg.hotkey, output=cfg.output,
+                            learning=cfg.learning)
+        elif gain > 100:
+            logger.warning("input_gain %.1f is unusually high (max recommended: 20.0), audio may clip", gain)
+
+        return cfg
     except Exception:
         logger.warning("Failed to parse %s, using defaults", config_path, exc_info=True)
         return AppConfig()
