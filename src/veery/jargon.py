@@ -75,7 +75,7 @@ class JargonDictionary:
 
     def _load_file(self, path: Path) -> None:
         if not path.exists():
-            logger.warning("Jargon file not found: %s", path)
+            logger.debug("Jargon file not found (optional): %s", path)
             return
 
         with open(path) as f:

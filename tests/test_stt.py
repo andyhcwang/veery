@@ -37,6 +37,10 @@ class TestWhisperSTT:
         assert result == "hello world"
         mock_sf.write.assert_called_once()
         mock_mlx.transcribe.assert_called_once()
+        call_kwargs = mock_mlx.transcribe.call_args.kwargs
+        assert call_kwargs["condition_on_previous_text"] is False
+        assert call_kwargs["no_speech_threshold"] == 0.35
+        assert call_kwargs["logprob_threshold"] is None
 
     def test_transcribe_empty_audio(self) -> None:
         """Empty audio array returns ''."""
@@ -192,6 +196,48 @@ class TestWhisperSTT:
             result = stt.transcribe(audio, 16000)
 
         assert result == "raw string result"
+
+    def test_transcribe_skips_low_energy_clip(self) -> None:
+        """Short low-energy clips should be treated as no-speech."""
+        from veery.stt import WhisperSTT
+
+        stt = WhisperSTT(STTConfig(backend="whisper"))
+        audio = np.zeros(16000, dtype=np.float32)
+
+        mock_sf = MagicMock()
+        mock_mlx = MagicMock()
+
+        with (
+            patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
+            patch("veery.stt.mlx_whisper", mock_mlx, create=True),
+            patch("veery.stt.sf", mock_sf, create=True),
+        ):
+            result = stt.transcribe(audio, 16000)
+
+        assert result == ""
+        mock_sf.write.assert_not_called()
+        mock_mlx.transcribe.assert_not_called()
+
+    def test_transcribe_zero_sample_rate_returns_empty(self) -> None:
+        """Zero sample rate should safely return '' without raising."""
+        from veery.stt import WhisperSTT
+
+        stt = WhisperSTT(STTConfig(backend="whisper"))
+        audio = np.ones(16000, dtype=np.float32)
+
+        mock_sf = MagicMock()
+        mock_mlx = MagicMock()
+
+        with (
+            patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
+            patch("veery.stt.mlx_whisper", mock_mlx, create=True),
+            patch("veery.stt.sf", mock_sf, create=True),
+        ):
+            result = stt.transcribe(audio, 0)
+
+        assert result == ""
+        mock_sf.write.assert_not_called()
+        mock_mlx.transcribe.assert_not_called()
 
     def test_default_config(self) -> None:
         """WhisperSTT with no config uses STTConfig defaults."""

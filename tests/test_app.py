@@ -66,6 +66,7 @@ def app():
 class FakeSegment:
     audio: np.ndarray
     sample_rate: int
+    duration_sec: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +295,18 @@ class TestProcessSegment:
         app._process_segment(seg)
 
         app._overlay.show_warning.assert_called_with("No transcription")
+        assert app._state == State.IDLE
+        assert app._session_count == 0
+
+    def test_process_segment_short_low_energy_skips_stt(self, app) -> None:
+        from veery.app import State
+        app._state = State.PROCESSING
+        seg = FakeSegment(audio=np.zeros(12000, dtype=np.float32), sample_rate=16000, duration_sec=0.75)
+
+        app._process_segment(seg)
+
+        app._stt.transcribe.assert_not_called()
+        app._overlay.show_warning.assert_called_with("No speech detected")
         assert app._state == State.IDLE
         assert app._session_count == 0
 

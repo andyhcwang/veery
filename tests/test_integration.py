@@ -190,7 +190,7 @@ class TestConfigLoadsDefaults:
         assert config.stt.whisper_model == "mlx-community/whisper-large-v3-turbo"
 
         assert isinstance(config.jargon, JargonConfig)
-        assert len(config.jargon.dict_paths) == 2
+        assert len(config.jargon.dict_paths) == 5
 
         assert isinstance(config.output, OutputConfig)
         assert config.output.cgevent_char_limit == 500

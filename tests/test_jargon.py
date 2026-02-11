@@ -77,7 +77,7 @@ class TestJargonDictionary:
 
     def test_missing_dict_file(self, caplog: pytest.LogCaptureFixture) -> None:
         cfg = JargonConfig(dict_paths=("/nonexistent/path/fake.yaml",))
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.DEBUG):
             d = JargonDictionary(cfg)
         assert len(d.reverse_index) == 0
         assert "not found" in caplog.text.lower()

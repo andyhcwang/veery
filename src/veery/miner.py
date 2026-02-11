@@ -72,6 +72,9 @@ _PHONETIC_SUBS: dict[str, list[str]] = {
     "io": ["i o"],
     "vm": ["v m"],
     "k8s": ["k 8 s", "kubernetes"],
+    "pr": ["p r"],
+    "env": ["e n v"],
+    "mcp": ["m c p"],
 }
 
 
@@ -138,6 +141,186 @@ def generate_variants(term: str) -> list[str]:
         variants.discard(canonical_lower)
 
     return sorted(variants)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Claude Code command scanning
+# ──────────────────────────────────────────────────────────────────
+
+
+def _generate_command_variants(stem: str) -> list[str]:
+    """Generate voice-friendly variants for a slash command stem.
+
+    Strategy (addressing max_phrase_words=3 limit):
+    - Single-word commands: "slash <word>" (2 words, fits in window)
+    - Multi-word commands: both "slash <words>" AND bare "<words>" variants.
+      Bare variants avoid exceeding the corrector's sliding window limit.
+
+    Examples:
+        "commit"         -> ["slash commit"]
+        "review-pr"      -> ["review p r", "slash review p r", "slash review pr"]
+        "commit-push-pr" -> ["commit push p r", "commit push pr",
+                             "slash commit push p r", "slash commit push pr"]
+    """
+    parts = stem.split("-")
+    parts = [p for p in parts if p]  # drop empty from leading/trailing hyphens
+    if not parts:
+        return []
+
+    # Build base + phonetic variants from parts
+    phonetic_combos = _expand_phonetic_variants(parts)
+    variants: set[str] = set()
+
+    for combo in phonetic_combos:
+        # Always add "slash" prefixed variant
+        variants.add("slash " + combo)
+        # For multi-word commands (2+ parts), also add bare variant
+        # to stay within max_phrase_words=3 corrector window
+        if len(parts) >= 2:
+            variants.add(combo)
+
+    # Remove the bare stem itself (e.g. "commit" alone would cause false positives)
+    base = " ".join(p.lower() for p in parts)
+    if len(parts) == 1:
+        variants.discard(base)
+
+    return sorted(variants)
+
+
+def _scan_claude_commands(root: Path) -> dict[str, list[str]]:
+    """Scan .claude/commands/ directories for custom slash command names.
+
+    Looks in:
+      - root/.claude/commands/**/*.md (project-local commands, including subdirs)
+
+    Subdirectory commands use colon notation: subdir/cmd.md -> /subdir:cmd
+
+    Returns:
+        dict mapping canonical form (e.g. "/review-pr") to list of voice variants.
+    """
+    cmd_dir = root / ".claude" / "commands"
+    if not cmd_dir.is_dir():
+        return {}
+
+    commands: dict[str, list[str]] = {}
+    for md_file in cmd_dir.rglob("*.md"):
+        # Skip non-.md suffixes like .md.backup, .md.20250827_104606
+        if md_file.suffix != ".md":
+            continue
+        # Skip README files
+        if md_file.stem.lower() == "readme":
+            continue
+        # Skip hidden files and very short stems
+        if md_file.stem.startswith(".") or len(md_file.stem) < 2:
+            continue
+
+        # Build canonical form from relative path
+        rel = md_file.relative_to(cmd_dir)
+        if len(rel.parts) == 1:
+            # Direct child: /stem
+            canonical = "/" + md_file.stem
+            variants = _generate_command_variants(md_file.stem)
+        else:
+            # Subdirectory: /subdir:stem (colon notation)
+            subdir_parts = list(rel.parts[:-1])
+            canonical = "/" + ":".join(subdir_parts + [md_file.stem])
+            # Variants use space-separated form: "slash subdir stem"
+            all_parts = subdir_parts + [md_file.stem]
+            combined_stem = "-".join(all_parts)
+            variants = _generate_command_variants(combined_stem)
+
+        if variants:
+            commands[canonical] = variants
+
+    logger.info("Found %d Claude commands in %s", len(commands), cmd_dir)
+    return commands
+
+
+def mine_claude_commands(
+    scan_paths: list[Path],
+    config: JargonConfig | None = None,
+) -> dict[str, list[str]]:
+    """Scan for Claude Code custom commands and return {canonical: [variants]}.
+
+    Scans:
+      - Each scan_path/.claude/commands/**/*.md
+      - ~/.claude/commands/**/*.md (global user commands)
+    """
+    if config is None:
+        config = JargonConfig()
+
+    existing = _load_existing_terms(config)
+
+    commands: dict[str, list[str]] = {}
+    for path in scan_paths:
+        if path.is_dir():
+            commands.update(_scan_claude_commands(path))
+
+    # Also scan ~/.claude/commands/ for global user commands
+    home_claude_root = Path.home()
+    if (home_claude_root / ".claude" / "commands").is_dir():
+        logger.info("Also scanning ~/.claude/commands/ for global commands")
+        commands.update(_scan_claude_commands(home_claude_root))
+
+    # Filter out commands already known in existing jargon dicts
+    commands = {k: v for k, v in commands.items() if k not in existing}
+
+    return commands
+
+
+def write_claude_commands_yaml(
+    commands: dict[str, list[str]],
+    output_path: Path,
+) -> int:
+    """Write discovered Claude commands to a YAML jargon file.
+
+    Merges with existing file without overwriting hand-edits.
+    Returns count of new terms written.
+    """
+    if not commands:
+        return 0
+
+    # Load existing file if present (for merge)
+    existing_terms: dict[str, list[str]] = {}
+    if output_path.exists():
+        with open(output_path) as f:
+            data = yaml.safe_load(f) or {}
+        existing_terms = data.get("terms", {})
+
+    # Only add new terms
+    added = 0
+    terms_to_write: dict[str, list[str]] = dict(existing_terms)
+    for canonical, variants in commands.items():
+        if canonical in terms_to_write:
+            continue
+        terms_to_write[canonical] = variants
+        added += 1
+
+    if added == 0:
+        return 0
+
+    # Write YAML with header comment
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        f"# Auto-generated by Veery jargon miner (Claude Code commands)\n"
+        f"# Generated: {datetime.now(tz=UTC).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"# Edit freely — re-running --mine will merge without overwriting.\n\n"
+    )
+    yaml_body = yaml.dump(
+        {"terms": terms_to_write},
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    tmp_path = output_path.with_suffix(".yaml.tmp")
+    with open(tmp_path, "w") as f:
+        f.write(header)
+        f.write(yaml_body)
+    tmp_path.replace(output_path)
+
+    logger.info("Wrote %d new Claude commands to %s", added, output_path)
+    return added
+
 
 # Directories to always skip
 _SKIP_DIRS = frozenset({

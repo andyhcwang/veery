@@ -10,6 +10,7 @@ import threading
 import time
 import webbrowser
 
+import numpy as np
 import rumps
 
 from veery import __version__, sounds
@@ -518,6 +519,18 @@ class VeeryApp(rumps.App):
         """
         success = False
         try:
+            # Guard against "press/release with no speech" short noise clips.
+            if segment.duration_sec < 1.0:
+                rms = float(np.sqrt(np.mean(segment.audio**2)))
+                if rms < 0.02:
+                    logger.info(
+                        "Skipping STT for short low-energy segment (duration=%.2fs, rms=%.4f).",
+                        segment.duration_sec,
+                        rms,
+                    )
+                    self._overlay.show_warning("No speech detected")
+                    return
+
             stt = self._stt
             if stt is None:
                 rumps.notification("Veery", "Error", "STT model not available")
@@ -719,12 +732,28 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     if args.mine:
-        from veery.miner import mine_terms, print_mining_report, write_mined_yaml
+        from veery.miner import (
+            mine_claude_commands,
+            mine_terms,
+            print_mining_report,
+            write_claude_commands_yaml,
+            write_mined_yaml,
+        )
         scan_paths = [Path(p).expanduser().resolve() for p in args.mine]
         output_path = Path(args.mine_output)
+
+        # Mine Python terms (existing)
         results = mine_terms(scan_paths)
         written_count = write_mined_yaml(results, output_path, scan_paths)
         print_mining_report(results, written_count=written_count, output_path=output_path)
+
+        # Mine Claude Code custom commands (output next to --mine-output)
+        commands = mine_claude_commands(scan_paths)
+        if commands:
+            cmd_output = output_path.parent / "mined_commands.yaml"
+            cmd_written = write_claude_commands_yaml(commands, cmd_output)
+            if cmd_written > 0:
+                print(f"\nAlso wrote {cmd_written} Claude Code command(s) to {cmd_output}")
         return
 
     app = VeeryApp()
