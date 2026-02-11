@@ -28,7 +28,7 @@ uv run ruff check src/ tests/    # lint
 - `overlay.py` — NSPanel-based floating pill overlay
 - `output.py` — CGEvent typing (short text) or clipboard paste (long text)
 - `learner.py` — Auto-learns corrections from re-dictation
-- `miner.py` — Mines jargon from codebases
+- `miner.py` — Mines jargon from codebases + Claude Code custom commands
 
 ## Key Patterns
 - All heavy models load in background thread (`_load_models`), `_ready` Event gates recording

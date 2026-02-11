@@ -81,6 +81,7 @@ class AudioRecorder:
 
         # sounddevice stream (created per-recording)
         self._stream: sd.InputStream | None = None
+        self._min_speech_frames = 3  # guard against single-frame VAD spikes (keyboard/noise)
 
     # ------------------------------------------------------------------
     # VAD model management
@@ -348,6 +349,13 @@ class AudioRecorder:
 
             # Strip trailing silence from the segment (only for VAD-segmented audio)
             if source is self._buffer:
+                if self._speech_frames < self._min_speech_frames:
+                    logger.debug(
+                        "Discarding segment with too few speech frames (%d < %d).",
+                        self._speech_frames,
+                        self._min_speech_frames,
+                    )
+                    return None
                 silence_samples = int(self._silence_frames * self._audio_cfg.chunk_samples)
                 if silence_samples > 0 and silence_samples < len(audio):
                     audio = audio[:-silence_samples]

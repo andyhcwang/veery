@@ -1,0 +1,123 @@
+# Claude Code built-in commands and conventions
+# These are always available, no mining required.
+
+terms:
+  # Built-in slash commands (single-word)
+  /help:
+    - slash help
+  /init:
+    - slash init
+    - slash in it
+  /clear:
+    - slash clear
+  /compact:
+    - slash compact
+  /config:
+    - slash config
+  /cost:
+    - slash cost
+  /doctor:
+    - slash doctor
+  /login:
+    - slash login
+    - slash log in
+  /logout:
+    - slash logout
+    - slash log out
+  /status:
+    - slash status
+  /review:
+    - slash review
+  /bug:
+    - slash bug
+  /commit:
+    - slash commit
+  /memory:
+    - slash memory
+  /agents:
+    - slash agents
+  /context:
+    - slash context
+  /exit:
+    - slash exit
+  /export:
+    - slash export
+  /hooks:
+    - slash hooks
+  /ide:
+    - slash ide
+    - i d e
+  /mcp:
+    - slash mcp
+    - m c p
+  /model:
+    - slash model
+  /permissions:
+    - slash permissions
+  /plan:
+    - slash plan
+  /plugin:
+    - slash plugin
+  /rename:
+    - slash rename
+  /resume:
+    - slash resume
+  /rewind:
+    - slash rewind
+  /sandbox:
+    - slash sandbox
+  /stats:
+    - slash stats
+  /teleport:
+    - slash teleport
+  /theme:
+    - slash theme
+  /todos:
+    - slash todos
+    - slash to dos
+  /usage:
+    - slash usage
+  /vim:
+    - slash vim
+  /bashes:
+    - slash bashes
+
+  # Built-in slash commands (multi-word / hyphenated)
+  /add-dir:
+    - slash add dir
+    - add dir
+  /pr-comments:
+    - p r comments
+    - pr comments
+  /output-style:
+    - slash output style
+    - output style
+  /install-github-app:
+    - install github app
+  /privacy-settings:
+    - slash privacy settings
+    - privacy settings
+  /release-notes:
+    - slash release notes
+    - release notes
+  /remote-env:
+    - slash remote env
+    - remote env
+  /security-review:
+    - slash security review
+    - security review
+  /terminal-setup:
+    - slash terminal setup
+    - terminal setup
+  /statusline:
+    - slash statusline
+    - slash status line
+
+  # @-mention conventions
+  "@docs":
+    - at docs
+    - at mention docs
+  "@codebase":
+    - at codebase
+    - at code base
+    - at mention codebase

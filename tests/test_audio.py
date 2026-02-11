@@ -208,6 +208,7 @@ class TestBuildSegment:
         rec = _make_recorder(vad_cfg=vad_cfg)
         # Add a tiny chunk (32ms << 1.0s minimum)
         rec._buffer.append(np.zeros(512, dtype=np.float32))
+        rec._speech_frames = 3
         assert rec._build_segment() is None
 
     def test_build_segment_returns_segment_when_valid(self) -> None:
@@ -215,6 +216,7 @@ class TestBuildSegment:
         rec = _make_recorder(vad_cfg=vad_cfg)
         # Add enough audio (16000 samples = 1s)
         rec._buffer.append(np.zeros(16000, dtype=np.float32))
+        rec._speech_frames = 3
         seg = rec._build_segment()
         assert seg is not None
         assert seg.duration_sec == 1.0
@@ -228,6 +230,7 @@ class TestBuildSegment:
         # Simulate 3 chunks of speech + silence_frames=1
         for _ in range(3):
             rec._buffer.append(np.ones(audio_cfg.chunk_samples, dtype=np.float32))
+        rec._speech_frames = 3
         rec._silence_frames = 1
 
         seg = rec._build_segment()
@@ -258,6 +261,15 @@ class TestBuildSegment:
         rec._raw_buffer.append(np.full(16000, 0.1, dtype=np.float32))
         # _state defaults to WAITING
         assert rec._build_segment(use_raw=True) is None
+
+    def test_build_segment_discards_false_positive_single_speech_frame(self) -> None:
+        """Single-frame VAD spikes should not become a valid segment."""
+        vad_cfg = VADConfig(min_speech_duration_sec=0.05)
+        rec = _make_recorder(vad_cfg=vad_cfg)
+        rec._buffer.append(np.ones(16000, dtype=np.float32))
+        rec._speech_frames = 1
+
+        assert rec._build_segment() is None
 
 
 # ---------------------------------------------------------------------------

@@ -508,6 +508,9 @@ def _strip_tags(text: str) -> str:
 
 class WhisperSTT:
     """Wrapper around mlx-whisper for multilingual-robust STT on Apple Silicon."""
+    _MIN_RMS_ENERGY = 0.006
+    _MIN_ACTIVE_FRAME_RMS = 0.012
+    _SHORT_CLIP_SEC = 1.0
 
     def __init__(self, config: STTConfig | None = None) -> None:
         self._config = config or STTConfig()
@@ -548,6 +551,32 @@ class WhisperSTT:
         except Exception:
             logger.exception("Failed to load Whisper model")
 
+    def _has_enough_speech_energy(self, audio: np.ndarray, sample_rate: int) -> bool:
+        """Cheap pre-check to avoid transcribing silent/noise-only clips."""
+        if audio.size == 0 or sample_rate <= 0:
+            return False
+
+        rms = float(np.sqrt(np.mean(audio**2)))
+        if rms < self._MIN_RMS_ENERGY:
+            return False
+
+        frame_size = max(1, int(sample_rate * 0.02))  # 20ms
+        n_frames = audio.size // frame_size
+        if n_frames == 0:
+            return False
+
+        framed = audio[: n_frames * frame_size].reshape(n_frames, frame_size)
+        frame_rms = np.sqrt(np.mean(framed**2, axis=1))
+        active_frames = int(np.count_nonzero(frame_rms >= self._MIN_ACTIVE_FRAME_RMS))
+        if active_frames == 0:
+            return False
+
+        duration_sec = audio.size / sample_rate
+        if duration_sec <= self._SHORT_CLIP_SEC and active_frames <= 2:
+            return False
+
+        return True
+
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
         """Transcribe a numpy audio array to text.
 
@@ -560,6 +589,18 @@ class WhisperSTT:
         """
         if audio.size == 0:
             return ""
+        if not self._has_enough_speech_energy(audio, sample_rate):
+            if sample_rate > 0:
+                logger.info(
+                    "Skipping Whisper transcription: low speech energy (duration=%.2fs).",
+                    audio.size / sample_rate,
+                )
+            else:
+                logger.info(
+                    "Skipping Whisper transcription: low speech energy (invalid sample_rate=%d).",
+                    sample_rate,
+                )
+            return ""
 
         try:
             import mlx_whisper
@@ -568,7 +609,17 @@ class WhisperSTT:
             # Reuse pre-allocated temp WAV path (mlx-whisper expects a file path)
             sf.write(self._tmp_wav, audio, sample_rate)
 
-            result = mlx_whisper.transcribe(self._tmp_wav, path_or_hf_repo=self._config.whisper_model)
+            result = mlx_whisper.transcribe(
+                self._tmp_wav,
+                path_or_hf_repo=self._config.whisper_model,
+                # Avoid prompt feedback loops on short/noisy clips.
+                condition_on_previous_text=False,
+                # Be more aggressive about skipping no-speech/silence windows.
+                no_speech_threshold=0.35,
+                logprob_threshold=None,
+                hallucination_silence_threshold=0.2,
+                temperature=0.0,
+            )
             text = result.get("text", "") if isinstance(result, dict) else str(result)
             return text.strip()
         except Exception:
