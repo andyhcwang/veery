@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import yaml
@@ -92,6 +92,15 @@ class AppConfig:
     learning: LearningConfig = field(default_factory=LearningConfig)
 
 
+def _filter_keys(cls: type, raw: dict) -> dict:
+    """Keep only keys that match dataclass fields, warn on unknown ones."""
+    valid = {f.name for f in fields(cls)}
+    unknown = set(raw) - valid
+    if unknown:
+        logger.warning("Ignoring unknown config keys for %s: %s", cls.__name__, ", ".join(sorted(unknown)))
+    return {k: v for k, v in raw.items() if k in valid}
+
+
 def load_config(config_path: Path | None = None) -> AppConfig:
     """Load config from YAML file, falling back to defaults for missing fields."""
     if config_path is None:
@@ -104,19 +113,18 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         with open(config_path) as f:
             raw = yaml.safe_load(f) or {}
 
+        jargon_raw = _filter_keys(JargonConfig, raw.get("jargon", {}))
+        if "dict_paths" in jargon_raw and isinstance(jargon_raw["dict_paths"], list):
+            jargon_raw["dict_paths"] = tuple(jargon_raw["dict_paths"])
+
         cfg = AppConfig(
-            audio=AudioConfig(**raw.get("audio", {})),
-            vad=VADConfig(**raw.get("vad", {})),
-            stt=STTConfig(**raw.get("stt", {})),
-            jargon=JargonConfig(
-                **{
-                    k: tuple(v) if k == "dict_paths" and isinstance(v, list) else v
-                    for k, v in raw.get("jargon", {}).items()
-                }
-            ),
-            hotkey=HotkeyConfig(**raw.get("hotkey", {})),
-            output=OutputConfig(**raw.get("output", {})),
-            learning=LearningConfig(**raw.get("learning", {})),
+            audio=AudioConfig(**_filter_keys(AudioConfig, raw.get("audio", {}))),
+            vad=VADConfig(**_filter_keys(VADConfig, raw.get("vad", {}))),
+            stt=STTConfig(**_filter_keys(STTConfig, raw.get("stt", {}))),
+            jargon=JargonConfig(**jargon_raw),
+            hotkey=HotkeyConfig(**_filter_keys(HotkeyConfig, raw.get("hotkey", {}))),
+            output=OutputConfig(**_filter_keys(OutputConfig, raw.get("output", {}))),
+            learning=LearningConfig(**_filter_keys(LearningConfig, raw.get("learning", {}))),
         )
 
         # Validate input_gain

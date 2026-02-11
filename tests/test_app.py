@@ -9,7 +9,66 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from veery.app import _is_repetitive_hallucination
 from veery.config import AppConfig
+
+# ---------------------------------------------------------------------------
+# _is_repetitive_hallucination
+# ---------------------------------------------------------------------------
+
+
+class TestIsRepetitiveHallucination:
+    def test_empty_string(self) -> None:
+        assert _is_repetitive_hallucination("") is False
+
+    def test_short_text_not_flagged(self) -> None:
+        """Fewer than 6 words should never be flagged."""
+        assert _is_repetitive_hallucination("Why Why Why Why Why") is False
+
+    def test_boundary_six_words_below_threshold(self) -> None:
+        """6 words where no single word exceeds 80%."""
+        assert _is_repetitive_hallucination("a b c d e f") is False
+
+    def test_boundary_six_words_at_threshold(self) -> None:
+        """6 words, 5 repetitions = 83% > 80% → hallucination."""
+        assert _is_repetitive_hallucination("Why Why Why Why Why ok") is True
+
+    def test_classic_hallucination(self) -> None:
+        assert _is_repetitive_hallucination("Why Why Why Why Why Why Why Why") is True
+
+    def test_case_insensitive(self) -> None:
+        """Mixed casing should still be detected."""
+        assert _is_repetitive_hallucination("Thank thank THANK Thank thank Thank") is True
+
+    def test_legitimate_repetitive_speech(self) -> None:
+        """Legitimate text with some repetition but under 80%."""
+        assert _is_repetitive_hallucination("go go go team go let us win") is False
+
+    def test_normal_sentence(self) -> None:
+        assert _is_repetitive_hallucination(
+            "The quick brown fox jumps over the lazy dog"
+        ) is False
+
+    def test_mixed_language_not_flagged(self) -> None:
+        """Bilingual text should not be falsely flagged."""
+        assert _is_repetitive_hallucination(
+            "我们 today 讨论 the project plan together"
+        ) is False
+
+    def test_hallucination_discards_in_process_segment(self, app) -> None:
+        """Integration: hallucination is discarded and shows correct warning."""
+        from veery.app import State
+
+        app._state = State.PROCESSING
+        app._stt.transcribe.return_value = "Why Why Why Why Why Why Why"
+        seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
+
+        app._process_segment(seg)
+
+        app._overlay.show_warning.assert_called_with("Filtered repetitive audio")
+        assert app._state == State.IDLE
+        assert app._session_count == 0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
