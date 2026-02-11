@@ -22,7 +22,7 @@ def _make_recorder(
     return recorder
 
 
-def _chunk(value: float = 0.0, samples: int = 1536) -> np.ndarray:
+def _chunk(value: float = 0.0, samples: int = 512) -> np.ndarray:
     """Simulate an indata array from sounddevice (shape: (samples, 1))."""
     return np.full((samples, 1), value, dtype=np.float32)
 
@@ -55,7 +55,7 @@ class TestVADStateMachine:
         rec = _make_recorder()
         rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.9)))
 
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
 
         assert rec.state == _State.SPEECH_DETECTED
         assert rec._speech_frames == 1
@@ -64,7 +64,7 @@ class TestVADStateMachine:
         rec = _make_recorder()
         rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.1)))
 
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
 
         assert rec.state == _State.WAITING
 
@@ -76,11 +76,11 @@ class TestVADStateMachine:
         )
 
         # First chunk: speech
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
         assert rec.state == _State.SPEECH_DETECTED
 
         # Second chunk: silence
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
         assert rec.state == _State.SILENCE_COUNTING
         assert rec._silence_frames == 1
 
@@ -91,17 +91,17 @@ class TestVADStateMachine:
             return_value=MagicMock(item=MagicMock(side_effect=lambda: next(probs)))
         )
 
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))  # speech
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))  # silence
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))  # speech
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))  # silence
         assert rec.state == _State.SILENCE_COUNTING
 
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))  # speech again
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))  # speech again
         assert rec.state == _State.SPEECH_DETECTED
         assert rec._silence_frames == 0
 
     def test_enough_silence_transitions_to_done(self) -> None:
         """After enough silence frames, state goes to DONE and event is set."""
-        vad_cfg = VADConfig(silence_duration_sec=0.192)  # 2 chunks at 96ms each
+        vad_cfg = VADConfig(silence_duration_sec=0.064)  # 2 chunks at 32ms each
         rec = _make_recorder(vad_cfg=vad_cfg)
 
         probs = iter([0.9, 0.1, 0.1])
@@ -109,9 +109,9 @@ class TestVADStateMachine:
             return_value=MagicMock(item=MagicMock(side_effect=lambda: next(probs)))
         )
 
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))  # speech
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))  # silence 1
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))  # silence 2
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))  # speech
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))  # silence 1
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))  # silence 2
 
         assert rec.state == _State.DONE
         assert rec._done_event.is_set()
@@ -123,7 +123,7 @@ class TestVADStateMachine:
         with rec._lock:
             rec._state = _State.DONE
 
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
         assert rec.state == _State.DONE
         assert len(rec._buffer) == 0  # nothing appended
 
@@ -132,7 +132,7 @@ class TestVADStateMachine:
         rec._vad_model = MagicMock(side_effect=RuntimeError("vad crash"))
 
         # Should not raise — exception is caught, treated as silence
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
         assert rec.state == _State.WAITING
 
 
@@ -150,21 +150,21 @@ class TestPreSpeechBuffer:
         rec._vad_model = MagicMock(side_effect=lambda *a, **kw: next(vals))
 
         # 2 silence chunks go into pre-speech buffer
-        rec._audio_callback(_chunk(0.1), 1536, None, MagicMock(spec=False))
-        rec._audio_callback(_chunk(0.2), 1536, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(0.1), 512, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(0.2), 512, None, MagicMock(spec=False))
         assert len(rec._pre_speech_buffer) == 2
         assert len(rec._buffer) == 0
 
         # Speech chunk flushes pre-speech into main buffer
-        rec._audio_callback(_chunk(0.5), 1536, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(0.5), 512, None, MagicMock(spec=False))
         assert len(rec._pre_speech_buffer) == 0
         assert len(rec._buffer) == 3  # 2 pre-speech + 1 speech
 
     def test_pre_speech_buffer_bounded_by_maxlen(self) -> None:
         """Pre-speech buffer should only keep ~500ms worth of chunks."""
         rec = _make_recorder()
-        # At 96ms/chunk, 500ms ≈ 5 chunks
-        expected_max = max(1, 500 // 96)
+        # At 32ms/chunk, 500ms ≈ 15 chunks
+        expected_max = max(1, 500 // 32)
         assert rec._pre_speech_buffer.maxlen is None or True  # initial deque
 
         # After prepare_stream, maxlen is set
@@ -186,8 +186,8 @@ class TestRawBuffer:
         rec = _make_recorder()
         rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.1)))
 
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))
-        rec._audio_callback(_chunk(), 1536, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
 
         assert len(rec._raw_buffer) == 2
         assert len(rec._buffer) == 0  # no speech, main buffer empty
@@ -206,8 +206,8 @@ class TestBuildSegment:
     def test_build_segment_returns_none_when_too_short(self) -> None:
         vad_cfg = VADConfig(min_speech_duration_sec=1.0)
         rec = _make_recorder(vad_cfg=vad_cfg)
-        # Add a tiny chunk (96ms << 1.0s minimum)
-        rec._buffer.append(np.zeros(1536, dtype=np.float32))
+        # Add a tiny chunk (32ms << 1.0s minimum)
+        rec._buffer.append(np.zeros(512, dtype=np.float32))
         rec._speech_frames = 3
         assert rec._build_segment() is None
 
@@ -252,13 +252,14 @@ class TestBuildSegment:
         assert seg is not None
         assert seg.duration_sec == 1.0
 
-    def test_build_segment_use_raw_ambient_noise_returns_none(self) -> None:
-        """Raw fallback should return None if audio is just ambient noise (low energy)."""
+    def test_build_segment_use_raw_waiting_returns_none(self) -> None:
+        """Raw fallback should return None when VAD never detected speech."""
         vad_cfg = VADConfig(min_speech_duration_sec=0.05)
         rec = _make_recorder(vad_cfg=vad_cfg)
 
-        # Raw buffer has very quiet audio (ambient noise below threshold)
-        rec._raw_buffer.append(np.full(16000, 0.001, dtype=np.float32))
+        # Raw buffer has audio but VAD state is still WAITING (no speech)
+        rec._raw_buffer.append(np.full(16000, 0.1, dtype=np.float32))
+        # _state defaults to WAITING
         assert rec._build_segment(use_raw=True) is None
 
     def test_build_segment_discards_false_positive_single_speech_frame(self) -> None:

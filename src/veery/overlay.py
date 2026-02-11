@@ -19,6 +19,45 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
+
+def _run_on_main(block) -> None:
+    """Dispatch a block to the main thread."""
+    try:
+        from PyObjCTools.AppHelper import callAfter
+        callAfter(block)
+    except Exception:
+        logger.exception("Failed to dispatch to main thread")
+
+
+def _get_active_screen() -> object:
+    """Get the screen where the user is currently working (follows mouse cursor).
+
+    Falls back to the main screen if the mouse is not found on any screen.
+    """
+    try:
+        import AppKit
+
+        mouse_loc = AppKit.NSEvent.mouseLocation()
+        screens = _NSScreen.screens()
+        if screens is None:
+            return _NSScreen.mainScreen()
+
+        for screen in screens:
+            frame = screen.frame()
+            if (frame.origin.x <= mouse_loc.x < frame.origin.x + frame.size.width and
+                    frame.origin.y <= mouse_loc.y < frame.origin.y + frame.size.height):
+                return screen
+
+        logger.debug(
+            "Mouse at (%.0f, %.0f) not within any of %d screens, falling back to main",
+            mouse_loc.x, mouse_loc.y, len(screens),
+        )
+    except Exception:
+        logger.debug("Failed to determine active screen, falling back to main screen")
+
+    return _NSScreen.mainScreen()
+
+
 # Lazy-loaded AppKit/Quartz references
 _NSPanel = None
 _NSColor = None
@@ -232,13 +271,13 @@ class OverlayIndicator:
         try:
             import AppKit  # noqa: F401
 
-            screen = _NSScreen.mainScreen()
+            screen = _get_active_screen()
             if screen is None:
                 return False
             screen_frame = screen.frame()
 
-            x = (screen_frame.size.width - _PILL_WIDTH) / 2
-            y = screen_frame.size.height - _PILL_HEIGHT - _PILL_TOP_OFFSET
+            x = screen_frame.origin.x + (screen_frame.size.width - _PILL_WIDTH) / 2
+            y = screen_frame.origin.y + screen_frame.size.height - _PILL_HEIGHT - _PILL_TOP_OFFSET
             frame = ((x, y), (_PILL_WIDTH, _PILL_HEIGHT))
 
             panel = _NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -318,14 +357,6 @@ class OverlayIndicator:
             logger.exception("Failed to create overlay panel")
             return False
 
-    def _run_on_main(self, block) -> None:
-        """Dispatch a block to the main thread."""
-        try:
-            from PyObjCTools.AppHelper import callAfter
-            callAfter(block)
-        except Exception:
-            logger.exception("Failed to dispatch to main thread")
-
     def _stop_timers(self) -> None:
         """Invalidate any running animation timers. Must be called from main thread."""
         if self._animation_timer is not None:
@@ -335,10 +366,24 @@ class OverlayIndicator:
             self._success_timer.invalidate()
             self._success_timer = None
 
+    def _reposition_panel(self) -> None:
+        """Update panel position to follow the active screen. Must be called from main thread."""
+        if self._panel is None:
+            return
+        screen = _get_active_screen()
+        if screen is None:
+            return
+        screen_frame = screen.frame()
+        x = screen_frame.origin.x + (screen_frame.size.width - _PILL_WIDTH) / 2
+        y = screen_frame.origin.y + screen_frame.size.height - _PILL_HEIGHT - _PILL_TOP_OFFSET
+        self._panel.setFrameOrigin_((x, y))
+
     def _fade_in(self) -> None:
         """Fade the panel in. Must be called from main thread."""
         if self._panel is None:
             return
+        # Reposition to follow active screen before showing
+        self._reposition_panel()
         _NSAnimationContext.beginGrouping()
         _NSAnimationContext.currentContext().setDuration_(0.15)
         self._panel.animator().setAlphaValue_(1.0)
@@ -378,7 +423,7 @@ class OverlayIndicator:
                     )
                 )
 
-        self._run_on_main(_show)
+        _run_on_main(_show)
 
     def show_processing(self) -> None:
         """Show the processing indicator with animated dots."""
@@ -404,7 +449,7 @@ class OverlayIndicator:
                     )
                 )
 
-        self._run_on_main(_show)
+        _run_on_main(_show)
 
     def show_success(self) -> None:
         """Show brief success flash, then auto-hide after ~1.2s."""
@@ -429,7 +474,7 @@ class OverlayIndicator:
                     )
                 )
 
-        self._run_on_main(_show)
+        _run_on_main(_show)
 
     def show_warning(self, message: str) -> None:
         """Show a brief warning message in the pill, then auto-hide after ~1.5s."""
@@ -456,7 +501,7 @@ class OverlayIndicator:
                     )
                 )
 
-        self._run_on_main(_show)
+        _run_on_main(_show)
 
     def hide(self) -> None:
         """Hide the overlay."""
@@ -466,7 +511,7 @@ class OverlayIndicator:
                 if self._panel is not None:
                     self._fade_out()
 
-        self._run_on_main(_hide)
+        _run_on_main(_hide)
 
 
 # ---- Download progress overlay ----
@@ -610,13 +655,13 @@ class DownloadProgressOverlay:
         try:
             import AppKit  # noqa: F401
 
-            screen = _NSScreen.mainScreen()
+            screen = _get_active_screen()
             if screen is None:
                 return False
             screen_frame = screen.frame()
 
-            x = (screen_frame.size.width - _DL_WIDTH) / 2
-            y = (screen_frame.size.height - _DL_HEIGHT) / 2
+            x = screen_frame.origin.x + (screen_frame.size.width - _DL_WIDTH) / 2
+            y = screen_frame.origin.y + (screen_frame.size.height - _DL_HEIGHT) / 2
             frame = ((x, y), (_DL_WIDTH, _DL_HEIGHT))
 
             panel = _NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -703,19 +748,23 @@ class DownloadProgressOverlay:
             logger.exception("Failed to create download progress panel")
             return False
 
-    def _run_on_main(self, block) -> None:
-        """Dispatch a block to the main thread."""
-        try:
-            from PyObjCTools.AppHelper import callAfter
-            callAfter(block)
-        except Exception:
-            logger.exception("Failed to dispatch to main thread")
-
     def _stop_timers(self) -> None:
         """Invalidate tips cycling timer. Must be called from main thread."""
         if self._tips_timer is not None:
             self._tips_timer.invalidate()
             self._tips_timer = None
+
+    def _reposition_panel(self) -> None:
+        """Update panel position to follow the active screen. Must be called from main thread."""
+        if self._panel is None:
+            return
+        screen = _get_active_screen()
+        if screen is None:
+            return
+        screen_frame = screen.frame()
+        x = screen_frame.origin.x + (screen_frame.size.width - _DL_WIDTH) / 2
+        y = screen_frame.origin.y + (screen_frame.size.height - _DL_HEIGHT) / 2
+        self._panel.setFrameOrigin_((x, y))
 
     def _cycle_tips(self) -> None:
         """Advance to the next tip. Called from main thread by NSTimer."""
@@ -730,6 +779,7 @@ class DownloadProgressOverlay:
                 if not self._ensure_panel():
                     return
                 self._stop_timers()
+                self._reposition_panel()
                 self._tips_index = 0
                 if self._tips_label is not None:
                     self._tips_label.setStringValue_(_TIPS[0])
@@ -770,7 +820,7 @@ class DownloadProgressOverlay:
         except Exception:
             logger.debug("Could not patch tips timer callback")
 
-        self._run_on_main(_show)
+        _run_on_main(_show)
 
     def set_progress(self, fraction: float, detail: str) -> None:
         """Update the progress bar and detail text.
@@ -789,7 +839,7 @@ class DownloadProgressOverlay:
                 if self._detail_label is not None:
                     self._detail_label.setStringValue_(detail)
 
-        self._run_on_main(_update)
+        _run_on_main(_update)
 
     def hide(self) -> None:
         """Hide the download progress overlay."""
@@ -802,7 +852,7 @@ class DownloadProgressOverlay:
                     self._panel.animator().setAlphaValue_(0.0)
                     _NSAnimationContext.endGrouping()
 
-        self._run_on_main(_hide)
+        _run_on_main(_hide)
 
 
 # ---- Permission guide overlay ----
@@ -965,13 +1015,13 @@ class PermissionGuideOverlay:
         try:
             import AppKit  # noqa: F401
 
-            screen = _NSScreen.mainScreen()
+            screen = _get_active_screen()
             if screen is None:
                 return False
             screen_frame = screen.frame()
 
-            x = (screen_frame.size.width - _PERM_WIDTH) / 2
-            y = (screen_frame.size.height - _PERM_HEIGHT) / 2
+            x = screen_frame.origin.x + (screen_frame.size.width - _PERM_WIDTH) / 2
+            y = screen_frame.origin.y + (screen_frame.size.height - _PERM_HEIGHT) / 2
             frame = ((x, y), (_PERM_WIDTH, _PERM_HEIGHT))
 
             panel = _NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -1050,19 +1100,23 @@ class PermissionGuideOverlay:
             logger.exception("Failed to create permission guide panel")
             return False
 
-    def _run_on_main(self, block) -> None:
-        """Dispatch a block to the main thread."""
-        try:
-            from PyObjCTools.AppHelper import callAfter
-            callAfter(block)
-        except Exception:
-            logger.exception("Failed to dispatch to main thread")
-
     def _stop_timer(self) -> None:
         """Stop the permission polling timer. Must be called from main thread."""
         if self._poll_timer is not None:
             self._poll_timer.invalidate()
             self._poll_timer = None
+
+    def _reposition_panel(self) -> None:
+        """Update panel position to follow the active screen. Must be called from main thread."""
+        if self._panel is None:
+            return
+        screen = _get_active_screen()
+        if screen is None:
+            return
+        screen_frame = screen.frame()
+        x = screen_frame.origin.x + (screen_frame.size.width - _PERM_WIDTH) / 2
+        y = screen_frame.origin.y + (screen_frame.size.height - _PERM_HEIGHT) / 2
+        self._panel.setFrameOrigin_((x, y))
 
     def _update_step_content(self) -> None:
         """Update panel text for the current step. Must be called from main thread."""
@@ -1160,6 +1214,7 @@ class PermissionGuideOverlay:
                     return
 
                 self._update_step_content()
+                self._reposition_panel()
                 self._panel.orderFrontRegardless()
                 self._fade_in()
 
@@ -1192,7 +1247,7 @@ class PermissionGuideOverlay:
                     )
                 )
 
-        self._run_on_main(_show)
+        _run_on_main(_show)
 
     def hide(self) -> None:
         """Hide the permission guide overlay."""
@@ -1202,4 +1257,4 @@ class PermissionGuideOverlay:
                 if self._panel is not None:
                     self._fade_out()
 
-        self._run_on_main(_hide)
+        _run_on_main(_hide)

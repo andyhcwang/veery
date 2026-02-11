@@ -1,7 +1,8 @@
 """Audio capture with Silero VAD for speech endpoint detection.
 
 Uses sounddevice.InputStream with a real-time callback to capture 16kHz mono audio.
-Silero VAD v5 (via torch.hub) classifies each 96ms chunk as speech/silence.
+The callback rechunks variable-size PortAudio blocks into exact 32ms (512-sample)
+frames for Silero VAD v5 (via torch.hub), which classifies each chunk as speech/silence.
 A state machine tracks speech onset and offset to produce complete utterances.
 """
 
@@ -74,6 +75,10 @@ class AudioRecorder:
         self._silence_frames = 0
         self._done_event = threading.Event()
 
+        # Rechunk buffer: accumulates incoming audio into exact VAD-sized chunks
+        self._rechunk_buf = np.zeros(self._audio_cfg.chunk_samples, dtype=np.float32)
+        self._rechunk_pos = 0
+
         # sounddevice stream (created per-recording)
         self._stream: sd.InputStream | None = None
         self._min_speech_frames = 3  # guard against single-frame VAD spikes (keyboard/noise)
@@ -136,11 +141,14 @@ class AudioRecorder:
         if self._vad_model is not None:
             self._vad_model.reset_states()
 
+        # Reset rechunk buffer for the new recording
+        self._rechunk_buf[:] = 0.0
+        self._rechunk_pos = 0
+
         self._stream = sd.InputStream(
             samplerate=self._audio_cfg.sample_rate,
             channels=self._audio_cfg.channels,
             dtype="float32",
-            blocksize=self._audio_cfg.chunk_samples,
             callback=self._audio_callback,
         )
         self._stream.start()
@@ -225,18 +233,40 @@ class AudioRecorder:
     ) -> None:
         """Called by sounddevice for each audio chunk.
 
-        MUST be fast: no allocations beyond the chunk copy, no logging,
-        no I/O. VAD inference is ~0.1ms on CPU, well within budget.
+        MUST be fast: no I/O, no logging. VAD inference is ~0.1ms on CPU.
+        Rechunks variable-size PortAudio blocks into exact 512-sample
+        (32ms) chunks required by Silero VAD.
         """
         if status:
             # Overflow or underflow — nothing we can do in real-time
             pass
 
-        # Copy the chunk (indata buffer is reused by sounddevice)
-        chunk = indata[:, 0].copy()
+        mono = indata[:, 0].copy()
 
-        # Run VAD on the chunk — wrapped in try/except because an unhandled
-        # exception in a sounddevice callback silently kills the stream.
+        # Apply input gain if configured (for quiet microphones)
+        if self._audio_cfg.input_gain != 1.0:
+            np.multiply(mono, self._audio_cfg.input_gain, out=mono)
+            np.clip(mono, -1.0, 1.0, out=mono)  # Clamp to valid audio range
+
+        vad_size = self._audio_cfg.chunk_samples
+        pos = 0
+
+        while pos < len(mono):
+            space = vad_size - self._rechunk_pos
+            n = min(space, len(mono) - pos)
+            self._rechunk_buf[self._rechunk_pos : self._rechunk_pos + n] = mono[pos : pos + n]
+            self._rechunk_pos += n
+            pos += n
+
+            if self._rechunk_pos >= vad_size:
+                self._process_vad_chunk(self._rechunk_buf.copy())
+                self._rechunk_pos = 0
+
+    def _process_vad_chunk(self, chunk: np.ndarray) -> None:
+        """Process a single VAD-sized audio chunk through the state machine.
+
+        Called from _audio_callback for each complete 512-sample chunk.
+        """
         try:
             chunk_tensor = torch.from_numpy(chunk)
             speech_prob = self._vad_model(chunk_tensor, self._audio_cfg.sample_rate).item()
@@ -301,14 +331,15 @@ class AudioRecorder:
         with self._lock:
             source = self._buffer
             if not source and use_raw:
-                # Manual stop: use raw buffer as fallback, but only if it
-                # contains meaningful audio (not just ambient noise).
-                raw_audio = list(self._raw_buffer)
-                if raw_audio:
-                    combined = np.concatenate(raw_audio)
-                    rms = float(np.sqrt(np.mean(combined**2)))
-                    if rms > 0.02:  # above ambient noise floor and key-click spikes
-                        source = self._raw_buffer
+                # Manual stop with no VAD-segmented audio.
+                if self._state == _State.WAITING:
+                    # VAD never detected speech — trust it, discard.
+                    logger.info("VAD detected no speech, discarding.")
+                    return None
+                # VAD did detect speech but buffer is empty (shouldn't
+                # normally happen) — fall back to raw buffer.
+                if self._raw_buffer:
+                    source = self._raw_buffer
             if not source:
                 logger.debug("No audio in buffer.")
                 return None

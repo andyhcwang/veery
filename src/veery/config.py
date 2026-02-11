@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import yaml
@@ -18,8 +18,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 class AudioConfig:
     sample_rate: int = 16000
     channels: int = 1
-    chunk_duration_ms: int = 96  # 96ms chunks → 1536 samples at 16kHz (Silero VAD supported size)
+    chunk_duration_ms: int = 32  # 32ms chunks → 512 samples at 16kHz (Silero VAD required size)
     max_duration_sec: float = 30.0  # Max recording length before auto-stop
+    input_gain: float = 1.0  # Multiplier for input audio (increase for quiet microphones)
 
     @property
     def chunk_samples(self) -> int:
@@ -97,6 +98,15 @@ class AppConfig:
     learning: LearningConfig = field(default_factory=LearningConfig)
 
 
+def _filter_keys(cls: type, raw: dict) -> dict:
+    """Keep only keys that match dataclass fields, warn on unknown ones."""
+    valid = {f.name for f in fields(cls)}
+    unknown = set(raw) - valid
+    if unknown:
+        logger.warning("Ignoring unknown config keys for %s: %s", cls.__name__, ", ".join(sorted(unknown)))
+    return {k: v for k, v in raw.items() if k in valid}
+
+
 def load_config(config_path: Path | None = None) -> AppConfig:
     """Load config from YAML file, falling back to defaults for missing fields."""
     if config_path is None:
@@ -109,20 +119,33 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         with open(config_path) as f:
             raw = yaml.safe_load(f) or {}
 
-        return AppConfig(
-            audio=AudioConfig(**raw.get("audio", {})),
-            vad=VADConfig(**raw.get("vad", {})),
-            stt=STTConfig(**raw.get("stt", {})),
-            jargon=JargonConfig(
-                **{
-                    k: tuple(v) if k == "dict_paths" and isinstance(v, list) else v
-                    for k, v in raw.get("jargon", {}).items()
-                }
-            ),
-            hotkey=HotkeyConfig(**raw.get("hotkey", {})),
-            output=OutputConfig(**raw.get("output", {})),
-            learning=LearningConfig(**raw.get("learning", {})),
+        jargon_raw = _filter_keys(JargonConfig, raw.get("jargon", {}))
+        if "dict_paths" in jargon_raw and isinstance(jargon_raw["dict_paths"], list):
+            jargon_raw["dict_paths"] = tuple(jargon_raw["dict_paths"])
+
+        cfg = AppConfig(
+            audio=AudioConfig(**_filter_keys(AudioConfig, raw.get("audio", {}))),
+            vad=VADConfig(**_filter_keys(VADConfig, raw.get("vad", {}))),
+            stt=STTConfig(**_filter_keys(STTConfig, raw.get("stt", {}))),
+            jargon=JargonConfig(**jargon_raw),
+            hotkey=HotkeyConfig(**_filter_keys(HotkeyConfig, raw.get("hotkey", {}))),
+            output=OutputConfig(**_filter_keys(OutputConfig, raw.get("output", {}))),
+            learning=LearningConfig(**_filter_keys(LearningConfig, raw.get("learning", {}))),
         )
+
+        # Validate input_gain
+        gain = cfg.audio.input_gain
+        if not isinstance(gain, (int, float)) or gain <= 0:
+            logger.warning("input_gain must be a positive number (got %r), resetting to 1.0", gain)
+            audio_kwargs = {k: v for k, v in vars(cfg.audio).items() if k != "input_gain"}
+            audio_kwargs["input_gain"] = 1.0
+            cfg = AppConfig(audio=AudioConfig(**audio_kwargs), vad=cfg.vad, stt=cfg.stt,
+                            jargon=cfg.jargon, hotkey=cfg.hotkey, output=cfg.output,
+                            learning=cfg.learning)
+        elif gain > 100:
+            logger.warning("input_gain %.1f is unusually high (max recommended: 20.0), audio may clip", gain)
+
+        return cfg
     except Exception:
         logger.warning("Failed to parse %s, using defaults", config_path, exc_info=True)
         return AppConfig()
