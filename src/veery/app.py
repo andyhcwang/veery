@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import webbrowser
+from collections import Counter
 
 import rumps
 
@@ -36,6 +37,18 @@ from veery.stt import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_repetitive_hallucination(text: str) -> bool:
+    """Detect repetitive Whisper hallucination (e.g. 'Why Why Why...').
+
+    Returns True when a single word accounts for >80% of a 6+ word sequence.
+    """
+    words = text.split()
+    if len(words) < 6:
+        return False
+    most_common_count = max(Counter(w.lower() for w in words).values())
+    return most_common_count / len(words) > 0.8
 
 
 class State(enum.Enum):
@@ -526,6 +539,11 @@ class VeeryApp(rumps.App):
             raw_text = stt.transcribe(segment.audio, segment.sample_rate)
             if not raw_text:
                 self._overlay.show_warning("No transcription")
+                return
+
+            if _is_repetitive_hallucination(raw_text):
+                logger.warning("Hallucination detected, discarding: %.80s...", raw_text)
+                self._overlay.show_warning("Filtered repetitive audio")
                 return
 
             logger.info("Transcribed: %s", raw_text)

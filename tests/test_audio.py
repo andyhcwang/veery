@@ -249,13 +249,14 @@ class TestBuildSegment:
         assert seg is not None
         assert seg.duration_sec == 1.0
 
-    def test_build_segment_use_raw_ambient_noise_returns_none(self) -> None:
-        """Raw fallback should return None if audio is just ambient noise (low energy)."""
+    def test_build_segment_use_raw_waiting_returns_none(self) -> None:
+        """Raw fallback should return None when VAD never detected speech."""
         vad_cfg = VADConfig(min_speech_duration_sec=0.05)
         rec = _make_recorder(vad_cfg=vad_cfg)
 
-        # Raw buffer has very quiet audio (ambient noise below threshold)
-        rec._raw_buffer.append(np.full(16000, 0.001, dtype=np.float32))
+        # Raw buffer has audio but VAD state is still WAITING (no speech)
+        rec._raw_buffer.append(np.full(16000, 0.1, dtype=np.float32))
+        # _state defaults to WAITING
         assert rec._build_segment(use_raw=True) is None
 
 
