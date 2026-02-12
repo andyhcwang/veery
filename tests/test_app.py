@@ -128,6 +128,11 @@ class FakeSegment:
     duration_sec: float = 1.0
 
 
+@dataclass
+class FakeCharKey:
+    char: str
+
+
 # ---------------------------------------------------------------------------
 # State management
 # ---------------------------------------------------------------------------
@@ -456,12 +461,26 @@ class TestTryAutoLearn:
             app._try_auto_learn("xyz abc 123")
         app._learner.log_correction.assert_not_called()
 
-    def test_auto_learn_skipped_too_similar(self, app) -> None:
+    def test_auto_learn_skipped_when_same_text(self, app) -> None:
         app._last_pasted_text = "hello world"
         app._last_pasted_time = time.monotonic()
         with patch("rapidfuzz.fuzz.ratio", return_value=98):
             app._try_auto_learn("hello world")
         app._learner.log_correction.assert_not_called()
+
+    def test_auto_learn_high_similarity_still_logs_when_different(self, app) -> None:
+        app._last_pasted_text = "the sharp ratio is up today"
+        app._last_pasted_time = time.monotonic()
+        app._learner.log_correction.return_value = None
+
+        # Minor edits can still be valid corrections and often score >95.
+        with patch("rapidfuzz.fuzz.ratio", return_value=99):
+            app._try_auto_learn("the Sharpe ratio is up today")
+
+        app._learner.log_correction.assert_called_once_with(
+            "the sharp ratio is up today",
+            "the Sharpe ratio is up today",
+        )
 
     def test_auto_learn_logs_correction(self, app) -> None:
         app._last_pasted_text = "sharp ratio"
@@ -472,6 +491,74 @@ class TestTryAutoLearn:
             app._try_auto_learn("Sharpe ratio")
 
         app._learner.log_correction.assert_called_once_with("sharp ratio", "Sharpe ratio")
+
+    def test_auto_learn_reloads_corrector_on_promotion(self, app) -> None:
+        import veery.app as app_module
+
+        app._last_pasted_text = "sharp ratio"
+        app._last_pasted_time = time.monotonic()
+        app._learner.log_correction.return_value = "Sharpe ratio"
+        app_module.JargonCorrector.reset_mock()
+        app_module.TextCorrector.reset_mock()
+
+        with patch("rapidfuzz.fuzz.ratio", return_value=70):
+            app._try_auto_learn("Sharpe ratio")
+
+        app_module.JargonCorrector.assert_called_once_with(app._config.jargon)
+        app_module.TextCorrector.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Manual edit learning
+# ---------------------------------------------------------------------------
+
+
+class TestManualEditLearning:
+    def test_cmd_arrow_delete_type_workflow_logs_correction(self, app) -> None:
+        app._learner.log_correction.return_value = None
+        app._begin_manual_edit_monitor("sharp ratio")
+
+        # Move to line start with Cmd+Left.
+        app._on_global_key_press("Key.cmd")
+        app._on_global_key_press("Key.left")
+        app._on_global_key_release("Key.cmd")
+
+        # Move to end of "sharp", then type "e" -> "sharpe ratio".
+        for _ in range(5):
+            app._on_global_key_press("Key.right")
+        app._on_global_key_press(FakeCharKey("e"))
+
+        app._finalize_manual_edit_learning()
+
+        app._learner.log_correction.assert_called_once_with("sharp ratio", "sharpe ratio")
+
+    def test_manual_edit_discarded_on_unknown_cmd_shortcut(self, app) -> None:
+        app._begin_manual_edit_monitor("sharp ratio")
+
+        app._on_global_key_press("Key.cmd")
+        app._on_global_key_press(FakeCharKey("v"))  # Cmd+V
+        app._on_global_key_release("Key.cmd")
+
+        assert app._manual_edit_session is None
+        app._finalize_manual_edit_learning()
+        app._learner.log_correction.assert_not_called()
+
+    def test_manual_edit_reloads_corrector_on_promotion(self, app) -> None:
+        import veery.app as app_module
+
+        app._learner.log_correction.return_value = "Sharpe ratio"
+        app_module.JargonCorrector.reset_mock()
+        app_module.TextCorrector.reset_mock()
+
+        app._begin_manual_edit_monitor("sharp ratio")
+        for _ in range(6):
+            app._on_global_key_press("Key.left")
+        app._on_global_key_press(FakeCharKey("e"))  # sharp -> sharpe
+
+        app._finalize_manual_edit_learning()
+
+        app_module.JargonCorrector.assert_called_once_with(app._config.jargon)
+        app_module.TextCorrector.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
