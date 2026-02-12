@@ -330,16 +330,36 @@ class AudioRecorder:
         """
         with self._lock:
             source = self._buffer
-            if not source and use_raw:
-                # Manual stop with no VAD-segmented audio.
-                if self._state == _State.WAITING:
-                    # VAD never detected speech — trust it, discard.
-                    logger.info("VAD detected no speech, discarding.")
-                    return None
-                # VAD did detect speech but buffer is empty (shouldn't
-                # normally happen) — fall back to raw buffer.
-                if self._raw_buffer:
+            if not source and use_raw and self._raw_buffer:
+                # Manual stop: if VAD misses onset, fall back to raw audio only
+                # when it looks speech-like (enough duration + non-trivial energy).
+                raw_audio = np.concatenate(list(self._raw_buffer))
+                raw_duration_sec = len(raw_audio) / self._audio_cfg.sample_rate
+                raw_rms = float(np.sqrt(np.mean(raw_audio**2)))
+                raw_peak = float(np.max(np.abs(raw_audio)))
+
+                min_manual_duration_sec = max(self._vad_cfg.min_speech_duration_sec, 0.25)
+                rms_threshold = 0.01
+                peak_threshold = 0.06
+                if raw_duration_sec >= min_manual_duration_sec and (
+                    raw_rms >= rms_threshold or raw_peak >= peak_threshold
+                ):
                     source = self._raw_buffer
+                    logger.info(
+                        "Using raw-audio fallback (state=%s, duration=%.2fs, rms=%.4f, peak=%.4f).",
+                        self._state.value,
+                        raw_duration_sec,
+                        raw_rms,
+                        raw_peak,
+                    )
+                elif self._state == _State.WAITING:
+                    logger.info(
+                        "VAD detected no speech; raw fallback rejected "
+                        "(duration=%.2fs, rms=%.4f, peak=%.4f).",
+                        raw_duration_sec,
+                        raw_rms,
+                        raw_peak,
+                    )
             if not source:
                 logger.debug("No audio in buffer.")
                 return None

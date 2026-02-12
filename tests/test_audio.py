@@ -252,13 +252,13 @@ class TestBuildSegment:
         assert seg is not None
         assert seg.duration_sec == 1.0
 
-    def test_build_segment_use_raw_waiting_returns_none(self) -> None:
-        """Raw fallback should return None when VAD never detected speech."""
+    def test_build_segment_use_raw_waiting_low_energy_returns_none(self) -> None:
+        """Raw fallback should reject quiet ambient audio in WAITING state."""
         vad_cfg = VADConfig(min_speech_duration_sec=0.05)
         rec = _make_recorder(vad_cfg=vad_cfg)
 
-        # Raw buffer has audio but VAD state is still WAITING (no speech)
-        rec._raw_buffer.append(np.full(16000, 0.1, dtype=np.float32))
+        # Raw buffer has only low-energy ambient noise.
+        rec._raw_buffer.append(np.full(16000, 0.002, dtype=np.float32))
         # _state defaults to WAITING
         assert rec._build_segment(use_raw=True) is None
 
@@ -337,6 +337,33 @@ class TestStreamLifecycle:
         rec._stream = mock_stream
         rec._raw_buffer.append(np.zeros(16000, dtype=np.float32))
         # _state remains WAITING (no speech detected)
+
+        seg = rec.stop_and_flush()
+
+        assert seg is None
+        mock_stream.stop.assert_called_once()
+
+    def test_stop_and_flush_waiting_with_voice_energy_uses_raw_fallback(self) -> None:
+        """Manual stop should recover speech even if VAD never left WAITING."""
+        rec = _make_recorder()
+        mock_stream = MagicMock()
+        rec._stream = mock_stream
+        rec._raw_buffer.append(np.full(16000, 0.015, dtype=np.float32))
+        rec._state = _State.WAITING
+
+        seg = rec.stop_and_flush()
+
+        assert seg is not None
+        assert seg.duration_sec == 1.0
+        mock_stream.stop.assert_called_once()
+
+    def test_stop_and_flush_waiting_short_click_rejected(self) -> None:
+        """Very short key-click-like bursts should not trigger raw fallback."""
+        rec = _make_recorder()
+        mock_stream = MagicMock()
+        rec._stream = mock_stream
+        rec._raw_buffer.append(np.full(512, 0.1, dtype=np.float32))  # ~32ms
+        rec._state = _State.WAITING
 
         seg = rec.stop_and_flush()
 
