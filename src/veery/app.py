@@ -10,6 +10,8 @@ import threading
 import time
 import webbrowser
 from collections import Counter
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 import numpy as np
 import rumps
@@ -38,6 +40,30 @@ from veery.stt import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MODIFIER_KEYS = {
+    "Key.cmd",
+    "Key.cmd_l",
+    "Key.cmd_r",
+    "Key.alt",
+    "Key.alt_l",
+    "Key.alt_r",
+    "Key.shift",
+    "Key.shift_l",
+    "Key.shift_r",
+}
+_CMD_MODIFIERS = {"Key.cmd", "Key.cmd_l", "Key.cmd_r"}
+_ALT_MODIFIERS = {"Key.alt", "Key.alt_l", "Key.alt_r"}
+
+
+@dataclass
+class _ManualEditSession:
+    original_text: str
+    text: str
+    cursor: int
+    started_at: float
+    last_event_at: float
+    edit_count: int = 0
 
 
 def _is_repetitive_hallucination(text: str) -> bool:
@@ -135,6 +161,11 @@ class VeeryApp(rumps.App):
         self._last_pasted_text: str | None = None
         self._last_pasted_time: float = 0.0
         self._correction_window_sec: float = 30.0  # auto-learn if re-dictated within 30s
+        self._manual_edit_window_sec: float = 45.0  # track manual edits after paste
+        self._manual_edit_idle_sec: float = 1.5  # finalize when no edit keys for this long
+        self._manual_edit_session: _ManualEditSession | None = None
+        self._manual_edit_lock = threading.Lock()
+        self._modifier_keys_down: set[str] = set()
 
         # Signals that recording stream is actually open and capturing audio
         self._recording_started = threading.Event()
@@ -358,10 +389,12 @@ class VeeryApp(rumps.App):
             logger.info("Registering push-to-talk key: right Cmd")
 
             def on_press(key):
+                self._on_global_key_press(key)
                 if key == Key.cmd_r:
                     self._on_key_down()
 
             def on_release(key):
+                self._on_global_key_release(key)
                 if key == Key.cmd_r:
                     self._on_key_up()
 
@@ -370,6 +403,310 @@ class VeeryApp(rumps.App):
             self._hotkey_listener.start()
         except Exception:
             logger.exception("Failed to start hotkey listener")
+
+    # ------------------------------------------------------------------
+    # Global key monitoring (manual-edit auto-learn)
+    # ------------------------------------------------------------------
+
+    def _normalize_key_event(self, key) -> tuple[str, str | None]:
+        """Normalize pynput key objects into ('char'|'key', value)."""
+        if key is None:
+            return "key", None
+        if isinstance(key, str):
+            if len(key) == 1:
+                return "char", key
+            return "key", key
+        char = getattr(key, "char", None)
+        if isinstance(char, str) and len(char) == 1:
+            return "char", char
+        return "key", str(key)
+
+    def _on_global_key_press(self, key) -> None:
+        """Track global key presses to infer manual post-paste corrections."""
+        key_kind, key_value = self._normalize_key_event(key)
+        if key_value is None:
+            return
+
+        if key_kind == "key" and key_value in _MODIFIER_KEYS:
+            with self._manual_edit_lock:
+                self._modifier_keys_down.add(key_value)
+            return
+
+        should_finalize = False
+        should_discard = False
+        now = time.monotonic()
+
+        with self._manual_edit_lock:
+            session = self._manual_edit_session
+            if session is None:
+                return
+
+            if now - session.started_at > self._manual_edit_window_sec:
+                should_discard = True
+            elif session.edit_count > 0 and now - session.last_event_at > self._manual_edit_idle_sec:
+                should_finalize = True
+            else:
+                status = self._apply_manual_edit_key_locked(session, key_kind, key_value)
+                if status == "discard":
+                    should_discard = True
+                elif status == "tracked":
+                    session.last_event_at = now
+
+        if should_discard:
+            self._discard_manual_edit_monitor()
+            return
+        if should_finalize:
+            self._finalize_manual_edit_learning()
+            return
+
+    def _on_global_key_release(self, key) -> None:
+        """Track key releases so modifier state stays accurate."""
+        key_kind, key_value = self._normalize_key_event(key)
+        if key_kind == "key" and key_value in _MODIFIER_KEYS:
+            with self._manual_edit_lock:
+                self._modifier_keys_down.discard(key_value)
+
+    def _begin_manual_edit_monitor(self, original_text: str) -> None:
+        """Start a short-lived edit tracking session for recently inserted text."""
+        if self._learner is None or not original_text:
+            return
+
+        self._finalize_manual_edit_learning()
+
+        now = time.monotonic()
+        with self._manual_edit_lock:
+            self._manual_edit_session = _ManualEditSession(
+                original_text=original_text,
+                text=original_text,
+                cursor=len(original_text),
+                started_at=now,
+                last_event_at=now,
+            )
+
+    def _discard_manual_edit_monitor(self) -> None:
+        """Drop active edit tracking session without learning."""
+        with self._manual_edit_lock:
+            self._manual_edit_session = None
+
+    def _finalize_manual_edit_learning(self) -> None:
+        """Convert inferred manual edits into a learning signal."""
+        session: _ManualEditSession | None = None
+        with self._manual_edit_lock:
+            if self._manual_edit_session is None:
+                return
+            session = self._manual_edit_session
+            self._manual_edit_session = None
+
+        if self._learner is None or session is None or session.edit_count <= 0:
+            return
+
+        original = session.original_text
+        edited = session.text
+
+        if not edited or original.strip().lower() == edited.strip().lower():
+            return
+
+        from rapidfuzz import fuzz
+
+        similarity = fuzz.ratio(original.lower(), edited.lower())
+        if similarity < 40:
+            logger.info("Skipping manual learn for large text rewrite (%.0f%% similar)", similarity)
+            return
+
+        self._last_pasted_text = edited
+        self._last_pasted_time = time.monotonic()
+
+        correction_phrase = self._extract_manual_correction_candidate(original, edited)
+        if correction_phrase is None:
+            return
+
+        logger.info(
+            "Manual correction detected (%.0f%% similar): '%s' -> '%s' [candidate: '%s']",
+            similarity,
+            original,
+            edited,
+            correction_phrase,
+        )
+        promoted = self._learner.log_correction(original, correction_phrase)
+        if promoted is not None:
+            self._reload_corrector_after_learning()
+            rumps.notification("Veery", "Learned!", f"Will now correct to: {promoted}")
+
+    def _extract_manual_correction_candidate(self, original: str, edited: str) -> str | None:
+        """Extract a short corrected phrase from word-level diffs."""
+        original_words = original.split()
+        edited_words = edited.split()
+        if not original_words or not edited_words:
+            return None
+
+        matcher = SequenceMatcher(a=original_words, b=edited_words, autojunk=False)
+        for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal" or j1 == j2:
+                continue
+            # Include one neighboring word on each side when available.
+            start = max(0, j1 - 1)
+            end = min(len(edited_words), j2 + 1)
+            candidate_words = edited_words[start:end]
+            if not candidate_words:
+                continue
+            if len(candidate_words) > 6:
+                continue
+            return " ".join(candidate_words)
+
+        if len(edited_words) <= 6:
+            return " ".join(edited_words)
+        return None
+
+    def _apply_manual_edit_key_locked(self, session: _ManualEditSession, key_kind: str, key_value: str) -> str:
+        """Apply a tracked key event to the in-memory edit buffer.
+
+        Returns:
+            "tracked": key was interpreted and session updated,
+            "ignore": key not relevant,
+            "discard": session should be discarded (unknown destructive shortcut).
+        """
+        cmd_active = any(k in self._modifier_keys_down for k in _CMD_MODIFIERS)
+        alt_active = any(k in self._modifier_keys_down for k in _ALT_MODIFIERS)
+
+        if key_kind == "char":
+            if cmd_active:
+                return "discard"
+            if not key_value.isprintable():
+                return "ignore"
+            self._insert_at_cursor(session, key_value)
+            session.edit_count += 1
+            return "tracked"
+
+        if key_value == "Key.space":
+            if cmd_active:
+                return "discard"
+            self._insert_at_cursor(session, " ")
+            session.edit_count += 1
+            return "tracked"
+
+        if key_value in {"Key.enter", "Key.return"}:
+            if cmd_active:
+                return "discard"
+            self._insert_at_cursor(session, "\n")
+            session.edit_count += 1
+            return "tracked"
+
+        if key_value == "Key.tab":
+            if cmd_active:
+                return "discard"
+            self._insert_at_cursor(session, "\t")
+            session.edit_count += 1
+            return "tracked"
+
+        if key_value == "Key.left":
+            if cmd_active:
+                session.cursor = self._line_start(session.text, session.cursor)
+            elif alt_active:
+                session.cursor = self._prev_word_boundary(session.text, session.cursor)
+            else:
+                session.cursor = max(0, session.cursor - 1)
+            return "tracked"
+
+        if key_value == "Key.right":
+            if cmd_active:
+                session.cursor = self._line_end(session.text, session.cursor)
+            elif alt_active:
+                session.cursor = self._next_word_boundary(session.text, session.cursor)
+            else:
+                session.cursor = min(len(session.text), session.cursor + 1)
+            return "tracked"
+
+        if key_value in {"Key.up", "Key.home"}:
+            if cmd_active or key_value == "Key.home":
+                session.cursor = 0
+                return "tracked"
+            return "ignore"
+
+        if key_value in {"Key.down", "Key.end"}:
+            if cmd_active or key_value == "Key.end":
+                session.cursor = len(session.text)
+                return "tracked"
+            return "ignore"
+
+        if key_value == "Key.backspace":
+            if cmd_active:
+                start = self._line_start(session.text, session.cursor)
+                if start < session.cursor:
+                    session.text = session.text[:start] + session.text[session.cursor:]
+                    session.cursor = start
+                    session.edit_count += 1
+                return "tracked"
+            if alt_active:
+                start = self._prev_word_boundary(session.text, session.cursor)
+                if start < session.cursor:
+                    session.text = session.text[:start] + session.text[session.cursor:]
+                    session.cursor = start
+                    session.edit_count += 1
+                return "tracked"
+            if session.cursor > 0:
+                session.text = session.text[: session.cursor - 1] + session.text[session.cursor:]
+                session.cursor -= 1
+                session.edit_count += 1
+            return "tracked"
+
+        if key_value == "Key.delete":
+            if cmd_active:
+                end = self._line_end(session.text, session.cursor)
+                if session.cursor < end:
+                    session.text = session.text[:session.cursor] + session.text[end:]
+                    session.edit_count += 1
+                return "tracked"
+            if alt_active:
+                end = self._next_word_boundary(session.text, session.cursor)
+                if session.cursor < end:
+                    session.text = session.text[:session.cursor] + session.text[end:]
+                    session.edit_count += 1
+                return "tracked"
+            if session.cursor < len(session.text):
+                session.text = session.text[:session.cursor] + session.text[session.cursor + 1 :]
+                session.edit_count += 1
+            return "tracked"
+
+        # Cmd + unknown key combo likely means copy/paste/undo etc. We cannot
+        # safely reconstruct the text after those edits, so skip this session.
+        if cmd_active:
+            return "discard"
+
+        return "ignore"
+
+    @staticmethod
+    def _insert_at_cursor(session: _ManualEditSession, text: str) -> None:
+        session.text = session.text[:session.cursor] + text + session.text[session.cursor:]
+        session.cursor += len(text)
+
+    @staticmethod
+    def _prev_word_boundary(text: str, cursor: int) -> int:
+        i = max(0, min(cursor, len(text)))
+        while i > 0 and text[i - 1].isspace():
+            i -= 1
+        while i > 0 and not text[i - 1].isspace():
+            i -= 1
+        return i
+
+    @staticmethod
+    def _next_word_boundary(text: str, cursor: int) -> int:
+        i = max(0, min(cursor, len(text)))
+        while i < len(text) and text[i].isspace():
+            i += 1
+        while i < len(text) and not text[i].isspace():
+            i += 1
+        return i
+
+    @staticmethod
+    def _line_start(text: str, cursor: int) -> int:
+        i = max(0, min(cursor, len(text)))
+        return text.rfind("\n", 0, i) + 1
+
+    @staticmethod
+    def _line_end(text: str, cursor: int) -> int:
+        i = max(0, min(cursor, len(text)))
+        j = text.find("\n", i)
+        return len(text) if j == -1 else j
 
     # ------------------------------------------------------------------
     # State management
@@ -427,6 +764,10 @@ class VeeryApp(rumps.App):
         if self._stt is None:
             self._overlay.show_warning("Models loading...")
             return
+
+        # If the user edited the previous output, commit that learning signal
+        # before starting the next dictation cycle.
+        self._finalize_manual_edit_learning()
 
         if self._recording_mode == "toggle":
             self._on_toggle_key()
@@ -573,6 +914,7 @@ class VeeryApp(rumps.App):
             paste_to_active_app(final_text, self._config.output)
             self._last_pasted_text = final_text
             self._last_pasted_time = time.monotonic()
+            self._begin_manual_edit_monitor(final_text)
             self._session_count += 1
             success = True
 
@@ -596,11 +938,15 @@ class VeeryApp(rumps.App):
         if elapsed > self._correction_window_sec:
             return
 
+        # Identical re-dictation is not a correction.
+        if self._last_pasted_text.strip().lower() == new_text.strip().lower():
+            return
+
         from rapidfuzz import fuzz
 
         similarity = fuzz.ratio(self._last_pasted_text.lower(), new_text.lower())
-        if similarity < 40 or similarity > 95:
-            # Too different = new text, too similar = same thing repeated
+        if similarity < 40:
+            # Too different = likely unrelated new dictation
             return
 
         logger.info(
@@ -609,7 +955,16 @@ class VeeryApp(rumps.App):
         )
         promoted = self._learner.log_correction(self._last_pasted_text, new_text)
         if promoted is not None:
+            self._reload_corrector_after_learning()
             rumps.notification("Veery", "Learned!", f"Will now correct to: {promoted}")
+
+    def _reload_corrector_after_learning(self) -> None:
+        """Reload jargon dictionaries so newly promoted terms take effect immediately."""
+        try:
+            self._corrector = TextCorrector(JargonCorrector(self._config.jargon))
+            logger.info("Reloaded TextCorrector after learning update")
+        except Exception:
+            logger.exception("Failed to reload TextCorrector after learning update")
 
     # ------------------------------------------------------------------
     # Menu callbacks
@@ -728,6 +1083,8 @@ class VeeryApp(rumps.App):
 
     def _on_quit(self, _sender) -> None:
         """Clean shutdown."""
+        self._finalize_manual_edit_learning()
+        self._discard_manual_edit_monitor()
         if self._hotkey_listener is not None:
             self._hotkey_listener.stop()
         if self._recorder is not None and self._recorder.is_recording:
