@@ -148,6 +148,56 @@ class TestNoCorrectionWhenEmpty:
         assert learner.log_correction("the sharp ratio", "   ") is None
 
 
+class TestLoadPendingMalformedYaml:
+    def test_non_dict_yaml_root(self, tmp_path: Path) -> None:
+        """If learned.yaml root is not a dict (e.g., a list), learner loads with empty pending."""
+        learned_path = tmp_path / "learned.yaml"
+        learned_path.write_text("- item1\n- item2\n")
+
+        config = _make_config(tmp_path)
+        learner = CorrectionLearner(config)
+        assert learner._pending == {}
+
+    def test_missing_keys_in_pending_entry(self, tmp_path: Path) -> None:
+        """Pending entries missing 'variant' or 'canonical' are skipped without crashing."""
+        learned_path = tmp_path / "learned.yaml"
+        data = {
+            "pending": [
+                {"variant": "sharp ratio", "canonical": "Sharpe ratio", "count": 2},
+                {"variant": "missing canonical"},
+                {"canonical": "missing variant"},
+                {},
+                {"variant": "tee wap", "canonical": "TWAP", "count": 1},
+            ]
+        }
+        learned_path.write_text(yaml.dump(data))
+
+        config = _make_config(tmp_path)
+        learner = CorrectionLearner(config)
+
+        # Only the two well-formed entries should be loaded
+        assert len(learner._pending) == 2
+        assert ("sharp ratio", "Sharpe ratio") in learner._pending
+        assert ("tee wap", "TWAP") in learner._pending
+
+    def test_non_dict_pending_entry(self, tmp_path: Path) -> None:
+        """A pending entry that is not a dict (e.g., a string) is skipped."""
+        learned_path = tmp_path / "learned.yaml"
+        data = {
+            "pending": [
+                "just a string",
+                {"variant": "sharp ratio", "canonical": "Sharpe ratio", "count": 1},
+            ]
+        }
+        learned_path.write_text(yaml.dump(data))
+
+        config = _make_config(tmp_path)
+        learner = CorrectionLearner(config)
+
+        assert len(learner._pending) == 1
+        assert ("sharp ratio", "Sharpe ratio") in learner._pending
+
+
 class TestMultipleDistinctCorrections:
     def test_multiple_distinct_corrections(self, tmp_path: Path) -> None:
         """Two different corrections tracked independently."""

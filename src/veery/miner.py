@@ -285,6 +285,9 @@ def write_claude_commands_yaml(
     if output_path.exists():
         with open(output_path) as f:
             data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            logger.warning("Skipping %s: YAML root is not a dict", output_path)
+            data = {}
         existing_terms = data.get("terms", {})
 
     # Only add new terms
@@ -427,6 +430,9 @@ def _load_existing_terms(config: JargonConfig) -> set[str]:
             continue
         with open(dict_path) as f:
             data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            logger.warning("Skipping %s: YAML root is not a dict", dict_path)
+            continue
         for canonical in data.get("terms", {}):
             existing.add(canonical)
     return existing
@@ -494,6 +500,9 @@ def write_mined_yaml(
     if output_path.exists():
         with open(output_path) as f:
             data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            logger.warning("Skipping %s: YAML root is not a dict", output_path)
+            data = {}
         existing_terms = data.get("terms", {})
 
     # Build new terms dict, skipping any already in the file

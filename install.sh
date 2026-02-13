@@ -72,7 +72,8 @@ check_python_version() {
         local major minor
         major=$(echo "$version" | cut -d. -f1)
         minor=$(echo "$version" | cut -d. -f2)
-        if [[ "$major" -ge 3 ]] && [[ "$minor" -ge 13 ]]; then
+        # Accept Python >= 3.13 (including future major versions like 4.x)
+        if [[ "$major" -gt 3 ]] || { [[ "$major" -eq 3 ]] && [[ "$minor" -ge 13 ]]; }; then
             return 0
         fi
     fi

@@ -291,3 +291,13 @@ class TestYamlEdgeCases:
         cfg = JargonConfig(dict_paths=(str(yaml_path),))
         d = JargonDictionary(cfg)
         assert len(d.reverse_index) == 0
+
+    def test_list_root_ignored(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """YAML with a list root (e.g., '- not-a-dict') should be ignored, not crash."""
+        yaml_path = tmp_path / "list_root.yaml"
+        yaml_path.write_text("- not-a-dict\n- also-not\n")
+        cfg = JargonConfig(dict_paths=(str(yaml_path),))
+        with caplog.at_level(logging.WARNING):
+            d = JargonDictionary(cfg)
+        assert len(d.reverse_index) == 0
+        assert "malformed" in caplog.text.lower()

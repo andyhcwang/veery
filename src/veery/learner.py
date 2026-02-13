@@ -41,8 +41,15 @@ class CorrectionLearner:
             return
         with open(self._learned_path) as f:
             data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            logger.warning("learned.yaml root is not a dict, ignoring: %s", type(data).__name__)
+            return
         for entry in data.get("pending", []):
-            key = (entry["variant"].lower(), entry["canonical"])
+            try:
+                key = (entry["variant"].lower(), entry["canonical"])
+            except (KeyError, TypeError):
+                logger.warning("Skipping malformed pending entry: %s", entry)
+                continue
             self._pending[key] = {
                 "count": entry.get("count", 1),
                 "first_seen": entry.get("first_seen", datetime.now(tz=UTC).strftime("%Y-%m-%d")),

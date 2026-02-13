@@ -10,10 +10,12 @@ from veery.config import JargonConfig
 from veery.miner import (
     _extract_names_from_ast,
     _is_interesting_name,
+    _load_existing_terms,
     _scan_directory,
     _split_camel_case,
     generate_variants,
     mine_terms,
+    write_claude_commands_yaml,
     write_mined_yaml,
 )
 
@@ -383,3 +385,107 @@ class TestWriteMinedYaml:
 
         assert count == 0
         assert not output.exists()
+
+
+class TestMalformedYamlRoot:
+    """Tests for non-dict YAML root handling across miner functions."""
+
+    def test_load_existing_terms_list_root(self, tmp_path: Path) -> None:
+        """_load_existing_terms skips YAML files whose root is a list."""
+        dict_path = tmp_path / "bad.yaml"
+        dict_path.write_text("- item1\n- item2\n")
+
+        config = JargonConfig(dict_paths=(str(dict_path),), learned_path=None)
+        result = _load_existing_terms(config)
+        assert result == set()
+
+    def test_load_existing_terms_string_root(self, tmp_path: Path) -> None:
+        """_load_existing_terms skips YAML files whose root is a string."""
+        dict_path = tmp_path / "bad.yaml"
+        dict_path.write_text("just a plain string\n")
+
+        config = JargonConfig(dict_paths=(str(dict_path),), learned_path=None)
+        result = _load_existing_terms(config)
+        assert result == set()
+
+    def test_load_existing_terms_mixed_valid_and_invalid(self, tmp_path: Path) -> None:
+        """_load_existing_terms skips bad files but loads good ones."""
+        good_path = tmp_path / "good.yaml"
+        good_path.write_text(yaml.dump({"terms": {"TWAP": ["tee wap"]}}))
+
+        bad_path = tmp_path / "bad.yaml"
+        bad_path.write_text("- item1\n- item2\n")
+
+        config = JargonConfig(
+            dict_paths=(str(good_path), str(bad_path)), learned_path=None
+        )
+        result = _load_existing_terms(config)
+        assert "TWAP" in result
+
+    def test_write_mined_yaml_list_root_existing(self, tmp_path: Path) -> None:
+        """write_mined_yaml treats list-root existing file as empty and writes terms."""
+        output = tmp_path / "mined.yaml"
+        output.write_text("- item1\n- item2\n")
+
+        results = [("TWAP", 3, False)]
+        count = write_mined_yaml(results, output, [tmp_path])
+
+        assert count == 1
+        data = yaml.safe_load(output.read_text())
+        assert "TWAP" in data["terms"]
+
+    def test_write_mined_yaml_string_root_existing(self, tmp_path: Path) -> None:
+        """write_mined_yaml treats string-root existing file as empty and writes terms."""
+        output = tmp_path / "mined.yaml"
+        output.write_text("just a string\n")
+
+        results = [("VWAP", 2, False)]
+        count = write_mined_yaml(results, output, [tmp_path])
+
+        assert count == 1
+        data = yaml.safe_load(output.read_text())
+        assert "VWAP" in data["terms"]
+
+    def test_write_claude_commands_yaml_list_root_existing(
+        self, tmp_path: Path
+    ) -> None:
+        """write_claude_commands_yaml treats list-root existing file as empty."""
+        output = tmp_path / "commands.yaml"
+        output.write_text("- item1\n- item2\n")
+
+        commands = {"/commit": ["slash commit"]}
+        count = write_claude_commands_yaml(commands, output)
+
+        assert count == 1
+        data = yaml.safe_load(output.read_text())
+        assert "/commit" in data["terms"]
+
+    def test_write_claude_commands_yaml_string_root_existing(
+        self, tmp_path: Path
+    ) -> None:
+        """write_claude_commands_yaml treats string-root existing file as empty."""
+        output = tmp_path / "commands.yaml"
+        output.write_text("just a string\n")
+
+        commands = {"/review-pr": ["slash review p r"]}
+        count = write_claude_commands_yaml(commands, output)
+
+        assert count == 1
+        data = yaml.safe_load(output.read_text())
+        assert "/review-pr" in data["terms"]
+
+    def test_mine_terms_with_malformed_dict(self, tmp_path: Path) -> None:
+        """mine_terms doesn't crash when jargon dict has a list root."""
+        bad_dict = tmp_path / "bad.yaml"
+        bad_dict.write_text("- not\n- a\n- dict\n")
+
+        code_dir = tmp_path / "src"
+        code_dir.mkdir()
+        (code_dir / "algo.py").write_text("TWAP = 1\n")
+
+        config = JargonConfig(dict_paths=(str(bad_dict),), learned_path=None)
+        results = mine_terms([code_dir], config=config)
+
+        result_dict = {term: (freq, known) for term, freq, known in results}
+        assert "TWAP" in result_dict
+        assert result_dict["TWAP"] == (1, False)
