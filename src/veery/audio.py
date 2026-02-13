@@ -277,11 +277,18 @@ class AudioRecorder:
         is_speech = speech_prob >= self._vad_cfg.threshold
 
         with self._lock:
-            if self._state == _State.DONE:
-                return
-
             # Always keep raw audio for manual stop fallback
             self._raw_buffer.append(chunk)
+
+            if self._state == _State.DONE:
+                if is_speech:
+                    # Speech resumed after silence timeout — re-activate.
+                    self._buffer.append(chunk)
+                    self._silence_frames = 0
+                    self._state = _State.SPEECH_DETECTED
+                    self._speech_frames += 1
+                    self._done_event.clear()
+                return
 
             if self._state == _State.WAITING:
                 # Accumulate pre-speech ring buffer

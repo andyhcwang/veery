@@ -116,16 +116,64 @@ class TestVADStateMachine:
         assert rec.state == _State.DONE
         assert rec._done_event.is_set()
 
-    def test_done_state_ignores_further_chunks(self) -> None:
+    def test_done_state_reactivates_on_speech(self) -> None:
+        """Speech after silence timeout re-activates VAD to SPEECH_DETECTED."""
         rec = _make_recorder()
         rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.9)))
 
         with rec._lock:
             rec._state = _State.DONE
+        rec._done_event.set()
 
         rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
+        assert rec.state == _State.SPEECH_DETECTED
+        assert len(rec._buffer) == 1  # speech chunk appended
+        assert len(rec._raw_buffer) == 1  # raw buffer always accumulates
+        assert not rec._done_event.is_set()  # cleared on re-activation
+
+    def test_done_state_accumulates_raw_on_silence(self) -> None:
+        """Silence in DONE state still accumulates raw buffer."""
+        rec = _make_recorder()
+        rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.0)))
+
+        with rec._lock:
+            rec._state = _State.DONE
+
+        rec._audio_callback(_chunk(), 512, None, MagicMock(spec=False))
+        assert rec.state == _State.DONE  # stays DONE
+        assert len(rec._buffer) == 0  # silence not appended to VAD buffer
+        assert len(rec._raw_buffer) == 1  # raw buffer accumulates
+
+    def test_speech_pause_speech_preserves_all_audio(self) -> None:
+        """Speech → 2s silence → speech: all audio is captured in VAD buffer."""
+        vad_cfg = VADConfig(silence_duration_sec=0.064)  # 2 chunks of silence = DONE
+        rec = _make_recorder(vad_cfg=vad_cfg)
+
+        # Sequence: speech, silence, silence (triggers DONE), silence, speech
+        probs = iter([0.9, 0.1, 0.1, 0.1, 0.9])
+        rec._vad_model = MagicMock(
+            return_value=MagicMock(item=MagicMock(side_effect=lambda: next(probs)))
+        )
+        status = MagicMock(spec=False)
+
+        rec._audio_callback(_chunk(0.5), 512, None, status)  # speech → SPEECH_DETECTED
+        rec._audio_callback(_chunk(0.0), 512, None, status)  # silence → SILENCE_COUNTING
+        rec._audio_callback(_chunk(0.0), 512, None, status)  # silence → DONE
         assert rec.state == _State.DONE
-        assert len(rec._buffer) == 0  # nothing appended
+
+        rec._audio_callback(_chunk(0.0), 512, None, status)  # silence in DONE (raw only)
+        assert rec.state == _State.DONE
+
+        rec._audio_callback(_chunk(0.5), 512, None, status)  # speech → re-activates
+        assert rec.state == _State.SPEECH_DETECTED
+
+        # VAD buffer has: speech + 2 silence + resumed speech = 4 chunks
+        # (the silence-in-DONE chunk is NOT in VAD buffer, only in raw)
+        assert len(rec._buffer) == 4
+        # Raw buffer has ALL 5 chunks
+        assert len(rec._raw_buffer) == 5
+        # Speech frames: initial 1 + resumed 1 = 2
+        assert rec._speech_frames == 2
 
     def test_vad_exception_treated_as_silence(self) -> None:
         rec = _make_recorder()
