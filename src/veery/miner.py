@@ -286,7 +286,7 @@ def write_claude_commands_yaml(
         with open(output_path) as f:
             data = yaml.safe_load(f) or {}
         if not isinstance(data, dict):
-            logger.warning("Skipping %s: YAML root is not a dict", output_path)
+            logger.warning("Malformed YAML root in %s (not a dict), treating as empty", output_path)
             data = {}
         existing_terms = data.get("terms", {})
 
@@ -501,7 +501,7 @@ def write_mined_yaml(
         with open(output_path) as f:
             data = yaml.safe_load(f) or {}
         if not isinstance(data, dict):
-            logger.warning("Skipping %s: YAML root is not a dict", output_path)
+            logger.warning("Malformed YAML root in %s (not a dict), treating as empty", output_path)
             data = {}
         existing_terms = data.get("terms", {})
 

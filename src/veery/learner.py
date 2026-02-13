@@ -47,7 +47,7 @@ class CorrectionLearner:
         for entry in data.get("pending", []):
             try:
                 key = (entry["variant"].lower(), entry["canonical"])
-            except (KeyError, TypeError):
+            except (KeyError, TypeError, AttributeError):
                 logger.warning("Skipping malformed pending entry: %s", entry)
                 continue
             self._pending[key] = {
@@ -140,11 +140,18 @@ class CorrectionLearner:
         if variant not in terms[canonical]:
             terms[canonical].append(variant)
 
-        # Remove from pending
+        # Remove from pending (guard against malformed entries)
         pending = data.get("pending", [])
-        data["pending"] = [
-            e for e in pending if not (e["variant"].lower() == variant and e["canonical"] == canonical)
-        ]
+        filtered = []
+        for e in pending:
+            try:
+                if e["variant"].lower() == variant and e["canonical"] == canonical:
+                    continue
+            except (KeyError, TypeError, AttributeError):
+                logger.warning("Skipping malformed pending entry during promote: %s", e)
+                continue
+            filtered.append(e)
+        data["pending"] = filtered
 
         # Also remove from in-memory pending
         self._pending.pop((variant, canonical), None)
@@ -172,7 +179,11 @@ class CorrectionLearner:
         """Load learned.yaml or return empty structure."""
         if self._learned_path.exists():
             with open(self._learned_path) as f:
-                return yaml.safe_load(f) or {}
+                data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                logger.warning("learned.yaml root is not a dict, treating as empty: %s", type(data).__name__)
+                return {}
+            return data
         return {}
 
     def _save_yaml(self, data: dict) -> None:
