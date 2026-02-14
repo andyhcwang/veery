@@ -148,6 +148,140 @@ class TestNoCorrectionWhenEmpty:
         assert learner.log_correction("the sharp ratio", "   ") is None
 
 
+class TestLoadPendingMalformedYaml:
+    def test_non_dict_yaml_root(self, tmp_path: Path) -> None:
+        """If learned.yaml root is not a dict (e.g., a list), learner loads with empty pending."""
+        learned_path = tmp_path / "learned.yaml"
+        learned_path.write_text("- item1\n- item2\n")
+
+        config = _make_config(tmp_path)
+        learner = CorrectionLearner(config)
+        assert learner._pending == {}
+
+    def test_missing_keys_in_pending_entry(self, tmp_path: Path) -> None:
+        """Pending entries missing 'variant' or 'canonical' are skipped without crashing."""
+        learned_path = tmp_path / "learned.yaml"
+        data = {
+            "pending": [
+                {"variant": "sharp ratio", "canonical": "Sharpe ratio", "count": 2},
+                {"variant": "missing canonical"},
+                {"canonical": "missing variant"},
+                {},
+                {"variant": "tee wap", "canonical": "TWAP", "count": 1},
+            ]
+        }
+        learned_path.write_text(yaml.dump(data))
+
+        config = _make_config(tmp_path)
+        learner = CorrectionLearner(config)
+
+        # Only the two well-formed entries should be loaded
+        assert len(learner._pending) == 2
+        assert ("sharp ratio", "Sharpe ratio") in learner._pending
+        assert ("tee wap", "TWAP") in learner._pending
+
+    def test_non_dict_pending_entry(self, tmp_path: Path) -> None:
+        """A pending entry that is not a dict (e.g., a string) is skipped."""
+        learned_path = tmp_path / "learned.yaml"
+        data = {
+            "pending": [
+                "just a string",
+                {"variant": "sharp ratio", "canonical": "Sharpe ratio", "count": 1},
+            ]
+        }
+        learned_path.write_text(yaml.dump(data))
+
+        config = _make_config(tmp_path)
+        learner = CorrectionLearner(config)
+
+        assert len(learner._pending) == 1
+        assert ("sharp ratio", "Sharpe ratio") in learner._pending
+
+
+class TestLoadYamlNonDictRoot:
+    def test_save_with_non_dict_yaml_root(self, tmp_path: Path) -> None:
+        """If learned.yaml becomes a list, _save() still works (treats as empty)."""
+        config = _make_config(tmp_path, promotion_threshold=5)
+        learner = CorrectionLearner(config)
+
+        # Log a correction so there's in-memory pending state
+        learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
+
+        # Corrupt the file to a list root
+        learned_path = tmp_path / "learned.yaml"
+        learned_path.write_text("- item1\n- item2\n")
+
+        # Next correction triggers _save() -> _load_yaml() on the corrupted file
+        # This should NOT crash — _load_yaml() returns {} for non-dict root
+        learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
+
+        data = yaml.safe_load(learned_path.read_text())
+        assert isinstance(data, dict)
+        assert len(data["pending"]) >= 1
+
+    def test_promote_with_non_dict_yaml_root(self, tmp_path: Path) -> None:
+        """If learned.yaml becomes a list mid-use, promotion still works."""
+        config = _make_config(tmp_path, promotion_threshold=2)
+        learner = CorrectionLearner(config)
+
+        learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
+
+        # Corrupt the file
+        learned_path = tmp_path / "learned.yaml"
+        learned_path.write_text("- item1\n- item2\n")
+
+        # Second correction triggers promotion -> _load_yaml() on corrupted file
+        result = learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
+        assert result == "Sharpe ratio"
+
+        data = yaml.safe_load(learned_path.read_text())
+        assert isinstance(data, dict)
+        assert "Sharpe ratio" in data["terms"]
+
+
+class TestAttributeErrorInPending:
+    def test_int_variant_skipped(self, tmp_path: Path) -> None:
+        """Pending entry with int variant (no .lower()) is skipped gracefully."""
+        learned_path = tmp_path / "learned.yaml"
+        data = {
+            "pending": [
+                {"variant": 123, "canonical": "Something", "count": 1},
+                {"variant": "sharp ratio", "canonical": "Sharpe ratio", "count": 2},
+            ]
+        }
+        learned_path.write_text(yaml.dump(data))
+
+        config = _make_config(tmp_path)
+        learner = CorrectionLearner(config)
+
+        assert len(learner._pending) == 1
+        assert ("sharp ratio", "Sharpe ratio") in learner._pending
+
+
+class TestPromoteMalformedPending:
+    def test_promote_skips_malformed_entries(self, tmp_path: Path) -> None:
+        """Malformed entries in pending list don't crash _promote()."""
+        config = _make_config(tmp_path, promotion_threshold=2)
+        learner = CorrectionLearner(config)
+
+        # Seed a valid correction
+        learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
+
+        # Inject a malformed entry into the file alongside the valid one
+        learned_path = tmp_path / "learned.yaml"
+        data = yaml.safe_load(learned_path.read_text())
+        data["pending"].append({"bad": "entry"})
+        data["pending"].append("just a string")
+        learned_path.write_text(yaml.dump(data))
+
+        # Second correction triggers promotion — should not crash on bad entries
+        result = learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
+        assert result == "Sharpe ratio"
+
+        data = yaml.safe_load(learned_path.read_text())
+        assert "Sharpe ratio" in data["terms"]
+
+
 class TestMultipleDistinctCorrections:
     def test_multiple_distinct_corrections(self, tmp_path: Path) -> None:
         """Two different corrections tracked independently."""

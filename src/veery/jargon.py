@@ -81,6 +81,10 @@ class JargonDictionary:
         with open(path) as f:
             data = yaml.safe_load(f) or {}
 
+        if not isinstance(data, dict):
+            logger.warning("Ignoring malformed jargon file (expected dict root): %s", path)
+            return
+
         terms: dict[str, list[str]] = data.get("terms", {})
         for canonical, variants in terms.items():
             if not variants:
