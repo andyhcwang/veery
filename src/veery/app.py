@@ -41,6 +41,61 @@ from veery.stt import (
 
 logger = logging.getLogger(__name__)
 
+# --- Main-thread dispatch for AppKit UI safety ---
+_main_thread_queue: list[callable] = []
+_main_thread_lock = threading.Lock()
+
+
+def _setup_main_thread_trampoline() -> None:
+    """Create the ObjC helper class once (must be called before first use)."""
+    global _MainThreadTrampoline  # noqa: PLW0603
+    from Foundation import NSObject
+
+    class _MainThreadTrampoline(NSObject):
+        """Singleton-style ObjC class that drains queued callables on the main thread."""
+
+        def drain_(self, _arg):  # noqa: N802
+            with _main_thread_lock:
+                fns = list(_main_thread_queue)
+                _main_thread_queue.clear()
+            for fn in fns:
+                try:
+                    fn()
+                except Exception:
+                    logger.exception("Error in main-thread callback")
+
+
+_MainThreadTrampoline = None  # type: ignore[assignment]
+
+
+def _run_on_main_thread(fn: callable) -> None:
+    """Schedule *fn* to run on the main (AppKit) thread.
+
+    Uses PyObjC's ``performSelectorOnMainThread`` so rumps/AppKit UI mutations
+    are always executed on the main run-loop, avoiding thread-safety issues.
+    Falls back to direct execution when no AppKit run loop is active (e.g. tests).
+    """
+    if threading.current_thread() is threading.main_thread():
+        fn()
+        return
+
+    global _MainThreadTrampoline  # noqa: PLW0602
+    try:
+        if _MainThreadTrampoline is None:
+            _setup_main_thread_trampoline()
+    except Exception:
+        # No PyObjC available (e.g. CI) — fall back to direct call
+        fn()
+        return
+
+    with _main_thread_lock:
+        _main_thread_queue.append(fn)
+
+    trampoline = _MainThreadTrampoline.alloc().init()
+    trampoline.performSelectorOnMainThread_withObject_waitUntilDone_(
+        "drain:", None, False,
+    )
+
 _MODIFIER_KEYS = {
     "Key.cmd",
     "Key.cmd_l",
@@ -239,12 +294,16 @@ class VeeryApp(rumps.App):
         or None if no download was needed.
         """
         if _is_sensevoice_cached(model_name):
-            self._detail_item.title = "Loading SenseVoice..."
+            _run_on_main_thread(
+                lambda: setattr(self._detail_item, "title", "Loading SenseVoice..."),
+            )
             return None
 
         overlay = DownloadProgressOverlay()
         overlay.show()
-        self._detail_item.title = "Downloading SenseVoice..."
+        _run_on_main_thread(
+            lambda: setattr(self._detail_item, "title", "Downloading SenseVoice..."),
+        )
 
         def _on_progress(fraction: float, detail: str) -> None:
             overlay.set_progress(fraction, detail)
@@ -272,9 +331,11 @@ class VeeryApp(rumps.App):
         download_overlay: DownloadProgressOverlay | None = None
         try:
             # VAD model (small, ~50MB — load first so recording is instant)
-            self.title = "\u2b07"  # down arrow
+            _run_on_main_thread(lambda: setattr(self, "title", "\u2b07"))
             if self._recorder is not None:
-                self._detail_item.title = "Loading VAD model..."
+                _run_on_main_thread(
+                    lambda: setattr(self._detail_item, "title", "Loading VAD model..."),
+                )
                 self._recorder._ensure_vad_loaded()
                 logger.info("VAD model pre-loaded")
 
@@ -286,7 +347,9 @@ class VeeryApp(rumps.App):
 
             if stt_cfg.backend == "whisper" and whisper_cached:
                 # Fast path: Whisper already cached, load directly
-                self._detail_item.title = "Loading Whisper..."
+                _run_on_main_thread(
+                    lambda: setattr(self._detail_item, "title", "Loading Whisper..."),
+                )
                 self._stt = create_stt(stt_cfg)
                 logger.info("STT loaded (backend=whisper, cached)")
 
@@ -296,7 +359,9 @@ class VeeryApp(rumps.App):
 
                 download_overlay = self._download_sensevoice_with_overlay(stt_cfg.model_name)
 
-                self._detail_item.title = "Loading SenseVoice..."
+                _run_on_main_thread(
+                    lambda: setattr(self._detail_item, "title", "Loading SenseVoice..."),
+                )
                 sv_config = replace(stt_cfg, backend="sensevoice")
                 self._stt = create_stt(sv_config)
                 logger.info("STT loaded (backend=sensevoice, progressive)")
@@ -307,10 +372,13 @@ class VeeryApp(rumps.App):
                     download_overlay = None
 
                 # User can dictate now
-                self.title = "\U0001f3a4"
-                self._detail_item.title = "Ready"
+                def _ui_progressive_ready():
+                    self.title = "\U0001f3a4"
+                    self._detail_item.title = "Ready"
+                    self._update_stt_checkmarks("sensevoice")
+
+                _run_on_main_thread(_ui_progressive_ready)
                 self._ready.set()
-                self._update_stt_checkmarks("sensevoice")
                 logger.info("STT ready — accepting dictation (SenseVoice while Whisper downloads)")
 
                 # Spawn background Whisper download
@@ -328,50 +396,69 @@ class VeeryApp(rumps.App):
                 download_overlay.hide()
 
             # Ready for recording
-            self.title = "\U0001f3a4"
-            self._detail_item.title = "Ready"
+            def _ui_ready():
+                self.title = "\U0001f3a4"
+                self._detail_item.title = "Ready"
+
+            _run_on_main_thread(_ui_ready)
             self._ready.set()
             logger.info("STT ready — accepting dictation")
         except Exception:
             logger.exception("Failed to load models")
             if download_overlay is not None:
                 download_overlay.hide()
-            self.title = "\u26a0"  # warning
-            self._detail_item.title = "Model load failed"
+
+            def _ui_failed():
+                self.title = "\u26a0"  # warning
+                self._detail_item.title = "Model load failed"
+
+            _run_on_main_thread(_ui_failed)
             self._ready.set()  # unblock anyway
 
     def _load_whisper_background(self) -> None:
         """Background thread: download Whisper and auto-switch when ready.
 
         Shows progress only in the menubar detail item (no overlay).
+        All UI mutations are dispatched to the main thread via _run_on_main_thread.
         """
         stt_cfg = self._config.stt
         self._whisper_loading = True
         try:
             def _progress(fraction: float, detail: str) -> None:
                 if "stalled" in detail.lower() or "retrying" in detail.lower():
-                    self._detail_item.title = f"Ready ({detail})"
+                    title = f"Ready ({detail})"
                 else:
                     pct = int(fraction * 100)
-                    self._detail_item.title = f"Ready (Whisper: {pct}%)"
+                    title = f"Ready (Whisper: {pct}%)"
+                _run_on_main_thread(lambda t=title: setattr(self._detail_item, "title", t))
 
             ensure_model_downloaded(stt_cfg.whisper_model, progress_callback=_progress)
-            self._detail_item.title = "Ready (loading Whisper...)"
+            _run_on_main_thread(
+                lambda: setattr(self._detail_item, "title", "Ready (loading Whisper...)"),
+            )
 
             # Load and warm up Whisper
             new_stt = create_stt(stt_cfg)
 
             if not self._whisper_download_cancelled:
                 self._stt = new_stt
-                self._update_stt_checkmarks("whisper")
-                self._detail_item.title = "Ready"
+
+                def _ui_switched():
+                    self._update_stt_checkmarks("whisper")
+                    self._detail_item.title = "Ready"
+
+                _run_on_main_thread(_ui_switched)
                 logger.info("Auto-switched to Whisper backend")
             else:
                 logger.info("Whisper downloaded but user switched backend, skipping auto-switch")
-                self._detail_item.title = "Ready"
+                _run_on_main_thread(
+                    lambda: setattr(self._detail_item, "title", "Ready"),
+                )
         except Exception:
             logger.exception("Background Whisper download/load failed")
-            self._detail_item.title = "Ready (Whisper failed)"
+            _run_on_main_thread(
+                lambda: setattr(self._detail_item, "title", "Ready (Whisper failed)"),
+            )
         finally:
             self._whisper_loading = False
 
@@ -727,18 +814,24 @@ class VeeryApp(rumps.App):
         logger.info("State: %s -> %s", old_state.value, new_state.value)
 
         if new_state == State.IDLE:
-            self.title = "\U0001f3a4"
-            self._detail_item.title = "Ready"
-            if not skip_overlay:
-                self._overlay.hide()
+            def _ui():
+                self.title = "\U0001f3a4"
+                self._detail_item.title = "Ready"
+                if not skip_overlay:
+                    self._overlay.hide()
+            _run_on_main_thread(_ui)
         elif new_state == State.RECORDING:
-            self.title = "\U0001f534"  # red circle
-            self._detail_item.title = "Recording..."
-            self._overlay.show_recording()
+            def _ui():
+                self.title = "\U0001f534"  # red circle
+                self._detail_item.title = "Recording..."
+                self._overlay.show_recording()
+            _run_on_main_thread(_ui)
         elif new_state == State.PROCESSING:
-            self.title = "\u231b"  # hourglass
-            self._detail_item.title = "Processing..."
-            self._overlay.show_processing()
+            def _ui():
+                self.title = "\u231b"  # hourglass
+                self._detail_item.title = "Processing..."
+                self._overlay.show_processing()
+            _run_on_main_thread(_ui)
 
     # ------------------------------------------------------------------
     # Hotkey handler
@@ -800,9 +893,13 @@ class VeeryApp(rumps.App):
         self._recording_started.clear()
         # Update UI for recording state
         logger.info("State: idle -> recording")
-        self.title = "\U0001f534"  # red circle
-        self._detail_item.title = "Recording..."
-        self._overlay.show_recording()
+
+        def _ui():
+            self.title = "\U0001f534"  # red circle
+            self._detail_item.title = "Recording..."
+            self._overlay.show_recording()
+
+        _run_on_main_thread(_ui)
         sounds.play_start()
 
         if self._recorder is not None:
@@ -928,7 +1025,8 @@ class VeeryApp(rumps.App):
             self._set_state(State.IDLE, skip_overlay=success)
             if self._session_count > 0:
                 n = self._session_count
-                self._detail_item.title = f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session"
+                title = f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session"
+                _run_on_main_thread(lambda t=title: setattr(self._detail_item, "title", t))
 
     def _try_auto_learn(self, new_text: str) -> None:
         """If the new dictation is similar to the last one, auto-learn the correction."""
@@ -1015,12 +1113,18 @@ class VeeryApp(rumps.App):
                 new_stt = create_stt(new_config)
                 self._stt = new_stt
                 self._stt_backend = backend_id
-                self._update_stt_checkmarks(backend_id)
-                self._detail_item.title = "Ready"
+
+                def _ui_ok():
+                    self._update_stt_checkmarks(backend_id)
+                    self._detail_item.title = "Ready"
+
+                _run_on_main_thread(_ui_ok)
                 logger.info("STT backend switched to %s", backend_id)
             except Exception:
                 logger.exception("Failed to switch STT backend to %s", backend_id)
-                self._detail_item.title = "Ready (STT switch failed)"
+                _run_on_main_thread(
+                    lambda: setattr(self._detail_item, "title", "Ready (STT switch failed)"),
+                )
             finally:
                 self._stt_switching = False
 
