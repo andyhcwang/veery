@@ -10,6 +10,7 @@ import threading
 import time
 import webbrowser
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -42,17 +43,24 @@ from veery.stt import (
 logger = logging.getLogger(__name__)
 
 # --- Main-thread dispatch for AppKit UI safety ---
-_main_thread_queue: list[callable] = []
+_main_thread_queue: list[Callable[[], None]] = []
 _main_thread_lock = threading.Lock()
+_MainThreadTrampoline: type | None = None
+_trampoline_instance: object | None = None
 
 
 def _setup_main_thread_trampoline() -> None:
-    """Create the ObjC helper class once (must be called before first use)."""
-    global _MainThreadTrampoline  # noqa: PLW0603
+    """Create the ObjC helper class once (must be called before first use).
+
+    Must be called under ``_main_thread_lock``.
+    """
+    global _MainThreadTrampoline, _trampoline_instance  # noqa: PLW0603
+    if _MainThreadTrampoline is not None:
+        return  # another thread won the race
     from Foundation import NSObject
 
-    class _MainThreadTrampoline(NSObject):
-        """Singleton-style ObjC class that drains queued callables on the main thread."""
+    class _Trampoline(NSObject):
+        """ObjC class that drains queued callables on the main thread."""
 
         def drain_(self, _arg):  # noqa: N802
             with _main_thread_lock:
@@ -62,13 +70,13 @@ def _setup_main_thread_trampoline() -> None:
                 try:
                     fn()
                 except Exception:
-                    logger.exception("Error in main-thread callback")
+                    logger.exception("Error in main-thread callback: %r", fn)
+
+    _MainThreadTrampoline = _Trampoline
+    _trampoline_instance = _Trampoline.alloc().init()
 
 
-_MainThreadTrampoline = None  # type: ignore[assignment]
-
-
-def _run_on_main_thread(fn: callable) -> None:
+def _run_on_main_thread(fn: Callable[[], None]) -> None:
     """Schedule *fn* to run on the main (AppKit) thread.
 
     Uses PyObjC's ``performSelectorOnMainThread`` so rumps/AppKit UI mutations
@@ -79,20 +87,21 @@ def _run_on_main_thread(fn: callable) -> None:
         fn()
         return
 
-    global _MainThreadTrampoline  # noqa: PLW0602
-    try:
-        if _MainThreadTrampoline is None:
-            _setup_main_thread_trampoline()
-    except Exception:
-        # No PyObjC available (e.g. CI) — fall back to direct call
-        fn()
-        return
-
     with _main_thread_lock:
+        if _MainThreadTrampoline is None:
+            try:
+                _setup_main_thread_trampoline()
+            except ImportError:
+                logger.debug("PyObjC not available, executing callback on calling thread")
+                fn()
+                return
+            except Exception:
+                logger.warning("Main-thread trampoline setup failed, falling back", exc_info=True)
+                fn()
+                return
         _main_thread_queue.append(fn)
 
-    trampoline = _MainThreadTrampoline.alloc().init()
-    trampoline.performSelectorOnMainThread_withObject_waitUntilDone_(
+    _trampoline_instance.performSelectorOnMainThread_withObject_waitUntilDone_(  # type: ignore[union-attr]
         "drain:", None, False,
     )
 
@@ -177,6 +186,10 @@ class VeeryApp(rumps.App):
 
         # Recording mode: "hold" (push-to-talk) or "toggle" (press-to-toggle)
         self._recording_mode: str = self._config.hotkey.mode
+
+        # Resolve hotkey label from config
+        combo = self._config.hotkey.key_combo
+        _, self._hotkey_label = _KEY_COMBO_MAP.get(combo, ("cmd_r", "Right \u2318"))
 
         # Hotkey info (updates based on mode)
         self._hotkey_item = rumps.MenuItem(self._hotkey_hint(), callback=None)
@@ -290,10 +303,14 @@ class VeeryApp(rumps.App):
 
         logger.info("Veery initialized")
 
+    def _set_detail(self, text: str) -> None:
+        """Update the detail menu item title on the main thread."""
+        _run_on_main_thread(lambda t=text: setattr(self._detail_item, "title", t))
+
     def _on_permissions_granted(self) -> None:
         """Called when all permissions are granted (from PermissionGuideOverlay)."""
         logger.info("Permissions granted, starting model loading...")
-        self._detail_item.title = "Loading models..."
+        self._set_detail("Loading models...")
         threading.Thread(target=self._load_models, daemon=True).start()
 
     def _download_sensevoice_with_overlay(
@@ -306,16 +323,12 @@ class VeeryApp(rumps.App):
         or None if no download was needed.
         """
         if _is_sensevoice_cached(model_name):
-            _run_on_main_thread(
-                lambda: setattr(self._detail_item, "title", "Loading SenseVoice..."),
-            )
+            self._set_detail("Loading SenseVoice...")
             return None
 
         overlay = DownloadProgressOverlay()
         overlay.show()
-        _run_on_main_thread(
-            lambda: setattr(self._detail_item, "title", "Downloading SenseVoice..."),
-        )
+        self._set_detail("Downloading SenseVoice...")
 
         def _on_progress(fraction: float, detail: str) -> None:
             overlay.set_progress(fraction, detail)
@@ -345,9 +358,7 @@ class VeeryApp(rumps.App):
             # VAD model (small, ~50MB — load first so recording is instant)
             _run_on_main_thread(lambda: setattr(self, "title", "\u2b07"))
             if self._recorder is not None:
-                _run_on_main_thread(
-                    lambda: setattr(self._detail_item, "title", "Loading VAD model..."),
-                )
+                self._set_detail("Loading VAD model...")
                 self._recorder._ensure_vad_loaded()
                 logger.info("VAD model pre-loaded")
 
@@ -359,9 +370,7 @@ class VeeryApp(rumps.App):
 
             if stt_cfg.backend == "whisper" and whisper_cached:
                 # Fast path: Whisper already cached, load directly
-                _run_on_main_thread(
-                    lambda: setattr(self._detail_item, "title", "Loading Whisper..."),
-                )
+                self._set_detail("Loading Whisper...")
                 self._stt = create_stt(stt_cfg)
                 logger.info("STT loaded (backend=whisper, cached)")
 
@@ -371,9 +380,7 @@ class VeeryApp(rumps.App):
 
                 download_overlay = self._download_sensevoice_with_overlay(stt_cfg.model_name)
 
-                _run_on_main_thread(
-                    lambda: setattr(self._detail_item, "title", "Loading SenseVoice..."),
-                )
+                self._set_detail("Loading SenseVoice...")
                 sv_config = replace(stt_cfg, backend="sensevoice")
                 self._stt = create_stt(sv_config)
                 logger.info("STT loaded (backend=sensevoice, progressive)")
@@ -442,12 +449,10 @@ class VeeryApp(rumps.App):
                 else:
                     pct = int(fraction * 100)
                     title = f"Ready (Whisper: {pct}%)"
-                _run_on_main_thread(lambda t=title: setattr(self._detail_item, "title", t))
+                self._set_detail(title)
 
             ensure_model_downloaded(stt_cfg.whisper_model, progress_callback=_progress)
-            _run_on_main_thread(
-                lambda: setattr(self._detail_item, "title", "Ready (loading Whisper...)"),
-            )
+            self._set_detail("Ready (loading Whisper...)")
 
             # Load and warm up Whisper
             new_stt = create_stt(stt_cfg)
@@ -463,14 +468,10 @@ class VeeryApp(rumps.App):
                 logger.info("Auto-switched to Whisper backend")
             else:
                 logger.info("Whisper downloaded but user switched backend, skipping auto-switch")
-                _run_on_main_thread(
-                    lambda: setattr(self._detail_item, "title", "Ready"),
-                )
+                self._set_detail("Ready")
         except Exception:
             logger.exception("Background Whisper download/load failed")
-            _run_on_main_thread(
-                lambda: setattr(self._detail_item, "title", "Ready (Whisper failed)"),
-            )
+            self._set_detail("Ready (Whisper failed)")
         finally:
             self._whisper_loading = False
 
@@ -507,15 +508,16 @@ class VeeryApp(rumps.App):
             self._hotkey_listener.start()
         except Exception:
             logger.exception("Failed to start hotkey listener")
-            _run_on_main_thread(
-                lambda: setattr(self._detail_item, "title", "Hotkey failed — check Input Monitoring"),
-            )
-            rumps.notification(
-                "Veery",
-                "Hotkey listener failed",
-                "Grant Input Monitoring in System Settings "
-                "\u2192 Privacy & Security \u2192 Input Monitoring, then restart.",
-            )
+            self._set_detail("Hotkey failed — check Input Monitoring")
+            try:
+                rumps.notification(
+                    "Veery",
+                    "Hotkey listener failed",
+                    "Grant Input Monitoring in System Settings "
+                    "\u2192 Privacy & Security \u2192 Input Monitoring, then restart.",
+                )
+            except Exception:
+                logger.warning("Could not send notification for hotkey failure")
 
     # ------------------------------------------------------------------
     # Global key monitoring (manual-edit auto-learn)
@@ -865,13 +867,9 @@ class VeeryApp(rumps.App):
 
     def _hotkey_hint(self) -> str:
         """Return the hotkey hint text based on current recording mode."""
-        label = getattr(self, "_hotkey_label", None)
-        if label is None:
-            combo = self._config.hotkey.key_combo
-            _, label = _KEY_COMBO_MAP.get(combo, ("cmd_r", "Right \u2318"))
         if self._recording_mode == "toggle":
-            return f"Press {label} to start/stop"
-        return f"Hold {label} to dictate"
+            return f"Press {self._hotkey_label} to start/stop"
+        return f"Hold {self._hotkey_label} to dictate"
 
     def _mode_label(self) -> str:
         """Return the mode menu item label showing the alternative mode."""
@@ -1055,8 +1053,9 @@ class VeeryApp(rumps.App):
             self._set_state(State.IDLE, skip_overlay=success)
             if self._session_count > 0:
                 n = self._session_count
-                title = f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session"
-                _run_on_main_thread(lambda t=title: setattr(self._detail_item, "title", t))
+                self._set_detail(
+                    f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session",
+                )
 
     def _try_auto_learn(self, new_text: str) -> None:
         """If the new dictation is similar to the last one, auto-learn the correction."""
@@ -1152,9 +1151,7 @@ class VeeryApp(rumps.App):
                 logger.info("STT backend switched to %s", backend_id)
             except Exception:
                 logger.exception("Failed to switch STT backend to %s", backend_id)
-                _run_on_main_thread(
-                    lambda: setattr(self._detail_item, "title", "Ready (STT switch failed)"),
-                )
+                self._set_detail("Ready (STT switch failed)")
             finally:
                 self._stt_switching = False
 
