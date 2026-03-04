@@ -98,11 +98,31 @@ class AudioRecorder:
                 return self._vad_model
 
             logger.info("Loading Silero VAD model...")
-            model, _ = torch.hub.load(
-                "snakers4/silero-vad",
-                "silero_vad",
-                trust_repo=True,
-            )
+            # Prefer cached model to avoid network dependency at startup.
+            from pathlib import Path
+
+            cache_dir = Path(torch.hub.get_dir()) / "snakers4_silero-vad_master"
+            if cache_dir.is_dir():
+                try:
+                    model, _ = torch.hub.load(
+                        str(cache_dir),
+                        "silero_vad",
+                        source="local",
+                        trust_repo=True,
+                    )
+                except Exception:
+                    logger.warning("Local VAD cache failed, falling back to remote.")
+                    model, _ = torch.hub.load(
+                        "snakers4/silero-vad",
+                        "silero_vad",
+                        trust_repo=True,
+                    )
+            else:
+                model, _ = torch.hub.load(
+                    "snakers4/silero-vad",
+                    "silero_vad",
+                    trust_repo=True,
+                )
             model.eval()
             self._vad_model = model
             logger.info("Silero VAD model loaded.")
@@ -219,6 +239,56 @@ class AudioRecorder:
     def state(self) -> _State:
         with self._lock:
             return self._state
+
+    def has_speech(self, audio: np.ndarray) -> bool:
+        """Run a lightweight VAD pass on a captured segment.
+
+        This is used as a second-stage gate before STT to avoid sending
+        near-silent/manual-stop clips that can trigger Whisper hallucinations.
+        """
+        if audio.size < self._audio_cfg.chunk_samples:
+            return False
+
+        model = self._ensure_vad_loaded()
+        try:
+            model.reset_states()
+        except Exception:
+            pass
+
+        speech_frames = 0
+        max_consecutive = 0
+        consecutive = 0
+        total_frames = 0
+
+        for start in range(0, audio.size - self._audio_cfg.chunk_samples + 1, self._audio_cfg.chunk_samples):
+            chunk = audio[start : start + self._audio_cfg.chunk_samples]
+            chunk_tensor = torch.from_numpy(chunk).unsqueeze(0)
+            try:
+                prob = model(chunk_tensor, self._audio_cfg.sample_rate).item()
+            except Exception:
+                prob = 0.0
+
+            total_frames += 1
+            if prob >= self._vad_cfg.threshold:
+                speech_frames += 1
+                consecutive += 1
+                if consecutive > max_consecutive:
+                    max_consecutive = consecutive
+            else:
+                consecutive = 0
+
+        try:
+            model.reset_states()
+        except Exception:
+            pass
+
+        if total_frames == 0:
+            return False
+
+        active_ratio = speech_frames / total_frames
+        duration_sec = audio.size / self._audio_cfg.sample_rate
+        min_frames = 3 if duration_sec < 1.0 else 5
+        return speech_frames >= min_frames and (active_ratio >= 0.1 or max_consecutive >= 3)
 
     # ------------------------------------------------------------------
     # sounddevice callback (runs on real-time audio thread)
@@ -339,33 +409,48 @@ class AudioRecorder:
             source = self._buffer
             if not source and use_raw and self._raw_buffer:
                 # Manual stop: if VAD misses onset, fall back to raw audio only
-                # when it looks speech-like (enough duration + non-trivial energy).
+                # when it looks speech-like (enough duration + sustained energy).
                 raw_audio = np.concatenate(list(self._raw_buffer))
                 raw_duration_sec = len(raw_audio) / self._audio_cfg.sample_rate
                 raw_rms = float(np.sqrt(np.mean(raw_audio**2)))
                 raw_peak = float(np.max(np.abs(raw_audio)))
+                frame_size = max(1, int(self._audio_cfg.sample_rate * 0.02))  # 20ms
+                n_frames = raw_audio.size // frame_size
+                active_frames = 0
+                active_ratio = 0.0
+                if n_frames > 0:
+                    framed = raw_audio[: n_frames * frame_size].reshape(n_frames, frame_size)
+                    frame_rms = np.sqrt(np.mean(framed**2, axis=1))
+                    active_frames = int(np.count_nonzero(frame_rms >= 0.015))
+                    active_ratio = active_frames / n_frames
 
                 min_manual_duration_sec = max(self._vad_cfg.min_speech_duration_sec, 0.25)
-                rms_threshold = 0.01
-                peak_threshold = 0.06
-                if raw_duration_sec >= min_manual_duration_sec and (
-                    raw_rms >= rms_threshold or raw_peak >= peak_threshold
+                if (
+                    raw_duration_sec >= min_manual_duration_sec
+                    and raw_rms >= 0.01
+                    and active_frames >= 3
+                    and active_ratio >= 0.2
                 ):
                     source = self._raw_buffer
                     logger.info(
-                        "Using raw-audio fallback (state=%s, duration=%.2fs, rms=%.4f, peak=%.4f).",
+                        "Using raw-audio fallback (state=%s, duration=%.2fs, rms=%.4f, peak=%.4f, "
+                        "active_frames=%d, active_ratio=%.2f).",
                         self._state.value,
                         raw_duration_sec,
                         raw_rms,
                         raw_peak,
+                        active_frames,
+                        active_ratio,
                     )
                 elif self._state == _State.WAITING:
                     logger.info(
                         "VAD detected no speech; raw fallback rejected "
-                        "(duration=%.2fs, rms=%.4f, peak=%.4f).",
+                        "(duration=%.2fs, rms=%.4f, peak=%.4f, active_frames=%d, active_ratio=%.2f).",
                         raw_duration_sec,
                         raw_rms,
                         raw_peak,
+                        active_frames,
+                        active_ratio,
                     )
             if not source:
                 logger.debug("No audio in buffer.")

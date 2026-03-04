@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 _STALL_TIMEOUT_SEC = 45
 _MAX_DOWNLOAD_SEC = 1200  # 20 min safety net
 
+# Serializes the tqdm monkeypatch + env mutation in _snapshot_download_with_stall_detection
+# so concurrent downloads don't clobber each other's progress hooks or env vars.
+_hf_download_lock = threading.Lock()
+
 
 class DownloadStalled(Exception):
     """Download progress stopped for too long."""
@@ -157,27 +161,28 @@ def _snapshot_download_with_stall_detection(
                 progress_callback(fraction, detail)
 
     def _download():
-        old_env = {}
-        if env_override:
-            for k, v in env_override.items():
-                old_env[k] = os.environ.get(k)
-                os.environ[k] = v
-        hf_tqdm_module.tqdm = _ProgressTqdm
-        try:
-            snapshot_download(repo_id)
-        except Exception as exc:
-            with state_lock:
-                state["error"] = exc
-        finally:
-            hf_tqdm_module.tqdm = OriginalTqdm
+        with _hf_download_lock:
+            old_env = {}
             if env_override:
-                for k in env_override:
-                    if old_env.get(k) is None:
-                        os.environ.pop(k, None)
-                    else:
-                        os.environ[k] = old_env[k]
-            with state_lock:
-                state["done"] = True
+                for k, v in env_override.items():
+                    old_env[k] = os.environ.get(k)
+                    os.environ[k] = v
+            hf_tqdm_module.tqdm = _ProgressTqdm
+            try:
+                snapshot_download(repo_id)
+            except Exception as exc:
+                with state_lock:
+                    state["error"] = exc
+            finally:
+                hf_tqdm_module.tqdm = OriginalTqdm
+                if env_override:
+                    for k in env_override:
+                        if old_env.get(k) is None:
+                            os.environ.pop(k, None)
+                        else:
+                            os.environ[k] = old_env[k]
+                with state_lock:
+                    state["done"] = True
 
     thread = threading.Thread(target=_download, daemon=True)
     thread.start()

@@ -358,7 +358,7 @@ class TestProcessSegment:
 
         app._process_segment(seg)
 
-        app._overlay.show_warning.assert_called_with("No transcription")
+        app._overlay.show_warning.assert_called_with("No speech detected")
         assert app._state == State.IDLE
         assert app._session_count == 0
 
@@ -366,6 +366,19 @@ class TestProcessSegment:
         from veery.app import State
         app._state = State.PROCESSING
         seg = FakeSegment(audio=np.zeros(12000, dtype=np.float32), sample_rate=16000, duration_sec=0.75)
+
+        app._process_segment(seg)
+
+        app._stt.transcribe.assert_not_called()
+        app._overlay.show_warning.assert_called_with("No speech detected")
+        assert app._state == State.IDLE
+        assert app._session_count == 0
+
+    def test_process_segment_vad_gate_rejects_no_speech(self, app) -> None:
+        from veery.app import State
+        app._state = State.PROCESSING
+        app._recorder.has_speech.return_value = False
+        seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
 
         app._process_segment(seg)
 

@@ -418,6 +418,21 @@ class TestStreamLifecycle:
         assert seg is None
         mock_stream.stop.assert_called_once()
 
+    def test_stop_and_flush_waiting_single_peak_rejected(self) -> None:
+        """A longer clip with only a transient peak should not trigger raw fallback."""
+        rec = _make_recorder()
+        mock_stream = MagicMock()
+        rec._stream = mock_stream
+        click_like = np.zeros(8000, dtype=np.float32)  # 0.5s at 16kHz
+        click_like[100] = 0.2  # single transient peak
+        rec._raw_buffer.append(click_like)
+        rec._state = _State.WAITING
+
+        seg = rec.stop_and_flush()
+
+        assert seg is None
+        mock_stream.stop.assert_called_once()
+
     def test_is_recording_property(self) -> None:
         rec = _make_recorder()
         assert rec.is_recording is False
@@ -441,4 +456,35 @@ class TestStreamLifecycle:
         assert rec.state == _State.WAITING
         assert rec._speech_frames == 0
         assert rec._silence_frames == 0
+
+
+# ---------------------------------------------------------------------------
+# has_speech
+# ---------------------------------------------------------------------------
+
+
+class TestHasSpeech:
+    def test_has_speech_false_on_silence(self) -> None:
+        rec = _make_recorder()
+        rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.1)))
+        audio = np.zeros(16000, dtype=np.float32)
+
+        assert rec.has_speech(audio) is False
+
+    def test_has_speech_true_on_sustained_speech_probs(self) -> None:
+        rec = _make_recorder()
+        rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.95)))
+        audio = np.full(16000, 0.02, dtype=np.float32)
+
+        assert rec.has_speech(audio) is True
+
+    def test_has_speech_false_on_single_spike_prob(self) -> None:
+        rec = _make_recorder()
+        probs = iter([0.95] + [0.1] * 64)
+        rec._vad_model = MagicMock(
+            return_value=MagicMock(item=MagicMock(side_effect=lambda: next(probs)))
+        )
+        audio = np.zeros(16000, dtype=np.float32)
+
+        assert rec.has_speech(audio) is False
         assert not rec._done_event.is_set()

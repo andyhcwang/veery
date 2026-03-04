@@ -10,6 +10,7 @@ import threading
 import time
 import webbrowser
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -41,6 +42,25 @@ from veery.stt import (
 
 logger = logging.getLogger(__name__)
 
+def _run_on_main_thread(fn: Callable[[], None]) -> None:
+    """Schedule *fn* to run on the main (AppKit) thread.
+
+    Uses PyObjCTools.AppHelper.callAfter (same approach as overlay.py) so
+    rumps/AppKit UI mutations are always executed on the main run-loop.
+    Falls back to direct execution on the main thread or when PyObjC is unavailable.
+    """
+    if threading.current_thread() is threading.main_thread():
+        fn()
+        return
+    try:
+        from PyObjCTools.AppHelper import callAfter
+
+        callAfter(fn)
+    except ImportError:
+        fn()
+    except Exception:
+        logger.exception("Failed to dispatch to main thread")
+
 _MODIFIER_KEYS = {
     "Key.cmd",
     "Key.cmd_l",
@@ -54,6 +74,18 @@ _MODIFIER_KEYS = {
 }
 _CMD_MODIFIERS = {"Key.cmd", "Key.cmd_l", "Key.cmd_r"}
 _ALT_MODIFIERS = {"Key.alt", "Key.alt_l", "Key.alt_r"}
+
+# Maps config key_combo strings to pynput Key attributes and display labels.
+_KEY_COMBO_MAP = {
+    "right_cmd": ("cmd_r", "Right \u2318"),
+    "left_cmd": ("cmd_l", "Left \u2318"),
+    "right_alt": ("alt_r", "Right \u2325"),
+    "left_alt": ("alt_l", "Left \u2325"),
+    "right_shift": ("shift_r", "Right \u21e7"),
+    "left_shift": ("shift_l", "Left \u21e7"),
+    "right_ctrl": ("ctrl_r", "Right \u2303"),
+    "left_ctrl": ("ctrl_l", "Left \u2303"),
+}
 
 
 @dataclass
@@ -110,6 +142,10 @@ class VeeryApp(rumps.App):
 
         # Recording mode: "hold" (push-to-talk) or "toggle" (press-to-toggle)
         self._recording_mode: str = self._config.hotkey.mode
+
+        # Resolve hotkey label from config
+        combo = self._config.hotkey.key_combo
+        _, self._hotkey_label = _KEY_COMBO_MAP.get(combo, ("cmd_r", "Right \u2318"))
 
         # Hotkey info (updates based on mode)
         self._hotkey_item = rumps.MenuItem(self._hotkey_hint(), callback=None)
@@ -223,10 +259,14 @@ class VeeryApp(rumps.App):
 
         logger.info("Veery initialized")
 
+    def _set_detail(self, text: str) -> None:
+        """Update the detail menu item title on the main thread."""
+        _run_on_main_thread(lambda t=text: setattr(self._detail_item, "title", t))
+
     def _on_permissions_granted(self) -> None:
         """Called when all permissions are granted (from PermissionGuideOverlay)."""
         logger.info("Permissions granted, starting model loading...")
-        self._detail_item.title = "Loading models..."
+        self._set_detail("Loading models...")
         threading.Thread(target=self._load_models, daemon=True).start()
 
     def _download_sensevoice_with_overlay(
@@ -239,12 +279,12 @@ class VeeryApp(rumps.App):
         or None if no download was needed.
         """
         if _is_sensevoice_cached(model_name):
-            self._detail_item.title = "Loading SenseVoice..."
+            self._set_detail("Loading SenseVoice...")
             return None
 
         overlay = DownloadProgressOverlay()
         overlay.show()
-        self._detail_item.title = "Downloading SenseVoice..."
+        self._set_detail("Downloading SenseVoice...")
 
         def _on_progress(fraction: float, detail: str) -> None:
             overlay.set_progress(fraction, detail)
@@ -272,9 +312,9 @@ class VeeryApp(rumps.App):
         download_overlay: DownloadProgressOverlay | None = None
         try:
             # VAD model (small, ~50MB — load first so recording is instant)
-            self.title = "\u2b07"  # down arrow
+            _run_on_main_thread(lambda: setattr(self, "title", "\u2b07"))
             if self._recorder is not None:
-                self._detail_item.title = "Loading VAD model..."
+                self._set_detail("Loading VAD model...")
                 self._recorder._ensure_vad_loaded()
                 logger.info("VAD model pre-loaded")
 
@@ -286,7 +326,7 @@ class VeeryApp(rumps.App):
 
             if stt_cfg.backend == "whisper" and whisper_cached:
                 # Fast path: Whisper already cached, load directly
-                self._detail_item.title = "Loading Whisper..."
+                self._set_detail("Loading Whisper...")
                 self._stt = create_stt(stt_cfg)
                 logger.info("STT loaded (backend=whisper, cached)")
 
@@ -296,7 +336,7 @@ class VeeryApp(rumps.App):
 
                 download_overlay = self._download_sensevoice_with_overlay(stt_cfg.model_name)
 
-                self._detail_item.title = "Loading SenseVoice..."
+                self._set_detail("Loading SenseVoice...")
                 sv_config = replace(stt_cfg, backend="sensevoice")
                 self._stt = create_stt(sv_config)
                 logger.info("STT loaded (backend=sensevoice, progressive)")
@@ -307,10 +347,13 @@ class VeeryApp(rumps.App):
                     download_overlay = None
 
                 # User can dictate now
-                self.title = "\U0001f3a4"
-                self._detail_item.title = "Ready"
+                def _ui_progressive_ready():
+                    self.title = "\U0001f3a4"
+                    self._detail_item.title = "Ready"
+                    self._update_stt_checkmarks("sensevoice")
+
+                _run_on_main_thread(_ui_progressive_ready)
                 self._ready.set()
-                self._update_stt_checkmarks("sensevoice")
                 logger.info("STT ready — accepting dictation (SenseVoice while Whisper downloads)")
 
                 # Spawn background Whisper download
@@ -328,50 +371,63 @@ class VeeryApp(rumps.App):
                 download_overlay.hide()
 
             # Ready for recording
-            self.title = "\U0001f3a4"
-            self._detail_item.title = "Ready"
+            def _ui_ready():
+                self.title = "\U0001f3a4"
+                self._detail_item.title = "Ready"
+
+            _run_on_main_thread(_ui_ready)
             self._ready.set()
             logger.info("STT ready — accepting dictation")
         except Exception:
             logger.exception("Failed to load models")
             if download_overlay is not None:
                 download_overlay.hide()
-            self.title = "\u26a0"  # warning
-            self._detail_item.title = "Model load failed"
+
+            def _ui_failed():
+                self.title = "\u26a0"  # warning
+                self._detail_item.title = "Model load failed"
+
+            _run_on_main_thread(_ui_failed)
             self._ready.set()  # unblock anyway
 
     def _load_whisper_background(self) -> None:
         """Background thread: download Whisper and auto-switch when ready.
 
         Shows progress only in the menubar detail item (no overlay).
+        All UI mutations are dispatched to the main thread via _run_on_main_thread.
         """
         stt_cfg = self._config.stt
         self._whisper_loading = True
         try:
             def _progress(fraction: float, detail: str) -> None:
                 if "stalled" in detail.lower() or "retrying" in detail.lower():
-                    self._detail_item.title = f"Ready ({detail})"
+                    title = f"Ready ({detail})"
                 else:
                     pct = int(fraction * 100)
-                    self._detail_item.title = f"Ready (Whisper: {pct}%)"
+                    title = f"Ready (Whisper: {pct}%)"
+                self._set_detail(title)
 
             ensure_model_downloaded(stt_cfg.whisper_model, progress_callback=_progress)
-            self._detail_item.title = "Ready (loading Whisper...)"
+            self._set_detail("Ready (loading Whisper...)")
 
             # Load and warm up Whisper
             new_stt = create_stt(stt_cfg)
 
             if not self._whisper_download_cancelled:
                 self._stt = new_stt
-                self._update_stt_checkmarks("whisper")
-                self._detail_item.title = "Ready"
+
+                def _ui_switched():
+                    self._update_stt_checkmarks("whisper")
+                    self._detail_item.title = "Ready"
+
+                _run_on_main_thread(_ui_switched)
                 logger.info("Auto-switched to Whisper backend")
             else:
                 logger.info("Whisper downloaded but user switched backend, skipping auto-switch")
-                self._detail_item.title = "Ready"
+                self._set_detail("Ready")
         except Exception:
             logger.exception("Background Whisper download/load failed")
-            self._detail_item.title = "Ready (Whisper failed)"
+            self._set_detail("Ready (Whisper failed)")
         finally:
             self._whisper_loading = False
 
@@ -382,20 +438,24 @@ class VeeryApp(rumps.App):
             item.state = 1 if bid == backend_id else 0
 
     def _start_hotkey_listener(self) -> None:
-        """Start hotkey listener: right Cmd triggers recording (hold or toggle mode)."""
+        """Start hotkey listener using the configured key_combo."""
         try:
             from pynput.keyboard import Key, Listener
 
-            logger.info("Registering push-to-talk key: right Cmd")
+            combo = self._config.hotkey.key_combo
+            pynput_attr, _ = _KEY_COMBO_MAP.get(combo, ("cmd_r", "Right \u2318"))
+            target_key = getattr(Key, pynput_attr, Key.cmd_r)
+
+            logger.info("Registering push-to-talk key: %s (%s)", combo, self._hotkey_label)
 
             def on_press(key):
                 self._on_global_key_press(key)
-                if key == Key.cmd_r:
+                if key == target_key:
                     self._on_key_down()
 
             def on_release(key):
                 self._on_global_key_release(key)
-                if key == Key.cmd_r:
+                if key == target_key:
                     self._on_key_up()
 
             self._hotkey_listener = Listener(on_press=on_press, on_release=on_release)
@@ -403,6 +463,16 @@ class VeeryApp(rumps.App):
             self._hotkey_listener.start()
         except Exception:
             logger.exception("Failed to start hotkey listener")
+            self._set_detail("Hotkey failed — check Input Monitoring")
+            try:
+                rumps.notification(
+                    "Veery",
+                    "Hotkey listener failed",
+                    "Grant Input Monitoring in System Settings "
+                    "\u2192 Privacy & Security \u2192 Input Monitoring, then restart.",
+                )
+            except Exception:
+                logger.warning("Could not send notification for hotkey failure")
 
     # ------------------------------------------------------------------
     # Global key monitoring (manual-edit auto-learn)
@@ -727,18 +797,24 @@ class VeeryApp(rumps.App):
         logger.info("State: %s -> %s", old_state.value, new_state.value)
 
         if new_state == State.IDLE:
-            self.title = "\U0001f3a4"
-            self._detail_item.title = "Ready"
-            if not skip_overlay:
-                self._overlay.hide()
+            def _ui():
+                self.title = "\U0001f3a4"
+                self._detail_item.title = "Ready"
+                if not skip_overlay:
+                    self._overlay.hide()
+            _run_on_main_thread(_ui)
         elif new_state == State.RECORDING:
-            self.title = "\U0001f534"  # red circle
-            self._detail_item.title = "Recording..."
-            self._overlay.show_recording()
+            def _ui():
+                self.title = "\U0001f534"  # red circle
+                self._detail_item.title = "Recording..."
+                self._overlay.show_recording()
+            _run_on_main_thread(_ui)
         elif new_state == State.PROCESSING:
-            self.title = "\u231b"  # hourglass
-            self._detail_item.title = "Processing..."
-            self._overlay.show_processing()
+            def _ui():
+                self.title = "\u231b"  # hourglass
+                self._detail_item.title = "Processing..."
+                self._overlay.show_processing()
+            _run_on_main_thread(_ui)
 
     # ------------------------------------------------------------------
     # Hotkey handler
@@ -747,8 +823,8 @@ class VeeryApp(rumps.App):
     def _hotkey_hint(self) -> str:
         """Return the hotkey hint text based on current recording mode."""
         if self._recording_mode == "toggle":
-            return "Press Right \u2318 to start/stop"
-        return "Hold Right \u2318 to dictate"
+            return f"Press {self._hotkey_label} to start/stop"
+        return f"Hold {self._hotkey_label} to dictate"
 
     def _mode_label(self) -> str:
         """Return the mode menu item label showing the alternative mode."""
@@ -800,9 +876,13 @@ class VeeryApp(rumps.App):
         self._recording_started.clear()
         # Update UI for recording state
         logger.info("State: idle -> recording")
-        self.title = "\U0001f534"  # red circle
-        self._detail_item.title = "Recording..."
-        self._overlay.show_recording()
+
+        def _ui():
+            self.title = "\U0001f534"  # red circle
+            self._detail_item.title = "Recording..."
+            self._overlay.show_recording()
+
+        _run_on_main_thread(_ui)
         sounds.play_start()
 
         if self._recorder is not None:
@@ -873,6 +953,18 @@ class VeeryApp(rumps.App):
         """
         success = False
         try:
+            if self._recorder is not None:
+                try:
+                    if not self._recorder.has_speech(segment.audio):
+                        logger.info(
+                            "Skipping STT: segment failed VAD speech check (duration=%.2fs).",
+                            segment.duration_sec,
+                        )
+                        self._overlay.show_warning("No speech detected")
+                        return
+                except Exception:
+                    logger.exception("Segment VAD speech check failed; continuing to STT")
+
             # Guard against "press/release with no speech" short noise clips.
             if segment.duration_sec < 1.0:
                 rms = float(np.sqrt(np.mean(segment.audio**2)))
@@ -892,7 +984,7 @@ class VeeryApp(rumps.App):
 
             raw_text = stt.transcribe(segment.audio, segment.sample_rate)
             if not raw_text:
-                self._overlay.show_warning("No transcription")
+                self._overlay.show_warning("No speech detected")
                 return
 
             if _is_repetitive_hallucination(raw_text):
@@ -928,7 +1020,9 @@ class VeeryApp(rumps.App):
             self._set_state(State.IDLE, skip_overlay=success)
             if self._session_count > 0:
                 n = self._session_count
-                self._detail_item.title = f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session"
+                self._set_detail(
+                    f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session",
+                )
 
     def _try_auto_learn(self, new_text: str) -> None:
         """If the new dictation is similar to the last one, auto-learn the correction."""
@@ -1015,12 +1109,16 @@ class VeeryApp(rumps.App):
                 new_stt = create_stt(new_config)
                 self._stt = new_stt
                 self._stt_backend = backend_id
-                self._update_stt_checkmarks(backend_id)
-                self._detail_item.title = "Ready"
+
+                def _ui_ok():
+                    self._update_stt_checkmarks(backend_id)
+                    self._detail_item.title = "Ready"
+
+                _run_on_main_thread(_ui_ok)
                 logger.info("STT backend switched to %s", backend_id)
             except Exception:
                 logger.exception("Failed to switch STT backend to %s", backend_id)
-                self._detail_item.title = "Ready (STT switch failed)"
+                self._set_detail("Ready (STT switch failed)")
             finally:
                 self._stt_switching = False
 
@@ -1115,7 +1213,7 @@ def main() -> None:
             write_mined_yaml,
         )
         scan_paths = [Path(p).expanduser().resolve() for p in args.mine]
-        output_path = Path(args.mine_output)
+        output_path = Path(args.mine_output).expanduser().resolve()
 
         # Mine Python terms (existing)
         results = mine_terms(scan_paths)
