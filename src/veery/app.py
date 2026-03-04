@@ -42,68 +42,24 @@ from veery.stt import (
 
 logger = logging.getLogger(__name__)
 
-# --- Main-thread dispatch for AppKit UI safety ---
-_main_thread_queue: list[Callable[[], None]] = []
-_main_thread_lock = threading.Lock()
-_MainThreadTrampoline: type | None = None
-_trampoline_instance: object | None = None
-
-
-def _setup_main_thread_trampoline() -> None:
-    """Create the ObjC helper class once (must be called before first use).
-
-    Must be called under ``_main_thread_lock``.
-    """
-    global _MainThreadTrampoline, _trampoline_instance  # noqa: PLW0603
-    if _MainThreadTrampoline is not None:
-        return  # another thread won the race
-    from Foundation import NSObject
-
-    class _Trampoline(NSObject):
-        """ObjC class that drains queued callables on the main thread."""
-
-        def drain_(self, _arg):  # noqa: N802
-            with _main_thread_lock:
-                fns = list(_main_thread_queue)
-                _main_thread_queue.clear()
-            for fn in fns:
-                try:
-                    fn()
-                except Exception:
-                    logger.exception("Error in main-thread callback: %r", fn)
-
-    _MainThreadTrampoline = _Trampoline
-    _trampoline_instance = _Trampoline.alloc().init()
-
-
 def _run_on_main_thread(fn: Callable[[], None]) -> None:
     """Schedule *fn* to run on the main (AppKit) thread.
 
-    Uses PyObjC's ``performSelectorOnMainThread`` so rumps/AppKit UI mutations
-    are always executed on the main run-loop, avoiding thread-safety issues.
-    Falls back to direct execution when no AppKit run loop is active (e.g. tests).
+    Uses PyObjCTools.AppHelper.callAfter (same approach as overlay.py) so
+    rumps/AppKit UI mutations are always executed on the main run-loop.
+    Falls back to direct execution on the main thread or when PyObjC is unavailable.
     """
     if threading.current_thread() is threading.main_thread():
         fn()
         return
+    try:
+        from PyObjCTools.AppHelper import callAfter
 
-    with _main_thread_lock:
-        if _MainThreadTrampoline is None:
-            try:
-                _setup_main_thread_trampoline()
-            except ImportError:
-                logger.debug("PyObjC not available, executing callback on calling thread")
-                fn()
-                return
-            except Exception:
-                logger.warning("Main-thread trampoline setup failed, falling back", exc_info=True)
-                fn()
-                return
-        _main_thread_queue.append(fn)
-
-    _trampoline_instance.performSelectorOnMainThread_withObject_waitUntilDone_(  # type: ignore[union-attr]
-        "drain:", None, False,
-    )
+        callAfter(fn)
+    except ImportError:
+        fn()
+    except Exception:
+        logger.exception("Failed to dispatch to main thread")
 
 _MODIFIER_KEYS = {
     "Key.cmd",
@@ -487,11 +443,10 @@ class VeeryApp(rumps.App):
             from pynput.keyboard import Key, Listener
 
             combo = self._config.hotkey.key_combo
-            pynput_attr, label = _KEY_COMBO_MAP.get(combo, ("cmd_r", "Right \u2318"))
-            self._hotkey_label = label
+            pynput_attr, _ = _KEY_COMBO_MAP.get(combo, ("cmd_r", "Right \u2318"))
             target_key = getattr(Key, pynput_attr, Key.cmd_r)
 
-            logger.info("Registering push-to-talk key: %s (%s)", combo, label)
+            logger.info("Registering push-to-talk key: %s (%s)", combo, self._hotkey_label)
 
             def on_press(key):
                 self._on_global_key_press(key)
