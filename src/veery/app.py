@@ -953,6 +953,18 @@ class VeeryApp(rumps.App):
         """
         success = False
         try:
+            if self._recorder is not None:
+                try:
+                    if not self._recorder.has_speech(segment.audio):
+                        logger.info(
+                            "Skipping STT: segment failed VAD speech check (duration=%.2fs).",
+                            segment.duration_sec,
+                        )
+                        self._overlay.show_warning("No speech detected")
+                        return
+                except Exception:
+                    logger.exception("Segment VAD speech check failed; continuing to STT")
+
             # Guard against "press/release with no speech" short noise clips.
             if segment.duration_sec < 1.0:
                 rms = float(np.sqrt(np.mean(segment.audio**2)))
@@ -972,7 +984,7 @@ class VeeryApp(rumps.App):
 
             raw_text = stt.transcribe(segment.audio, segment.sample_rate)
             if not raw_text:
-                self._overlay.show_warning("No transcription")
+                self._overlay.show_warning("No speech detected")
                 return
 
             if _is_repetitive_hallucination(raw_text):
