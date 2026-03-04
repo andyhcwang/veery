@@ -866,6 +866,7 @@ _PERM_POLL_INTERVAL = 2.0  # seconds between permission checks
 # System Settings deep links
 _ACCESSIBILITY_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 _MICROPHONE_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+_INPUT_MONITORING_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 
 _PERM_STEPS = (
     {
@@ -876,7 +877,7 @@ _PERM_STEPS = (
             "\n"
             "System Settings \u2192 Privacy & Security \u2192 Accessibility"
         ),
-        "step_label": "Step 1 of 2",
+        "step_label": "Step 1 of 3",
         "settings_url": _ACCESSIBILITY_URL,
     },
     {
@@ -886,8 +887,20 @@ _PERM_STEPS = (
             "\n"
             "System Settings \u2192 Privacy & Security \u2192 Microphone"
         ),
-        "step_label": "Step 2 of 2",
+        "step_label": "Step 2 of 3",
         "settings_url": _MICROPHONE_URL,
+    },
+    {
+        "title": "Veery needs your permission",
+        "body": (
+            "Veery needs Input Monitoring to detect the\n"
+            "push-to-talk hotkey.\n"
+            "\n"
+            "System Settings \u2192 Privacy & Security \u2192 Input Monitoring\n"
+            '(The entry may appear as "uv" or "Python")'
+        ),
+        "step_label": "Step 3 of 3",
+        "settings_url": _INPUT_MONITORING_URL,
     },
 )
 
@@ -939,9 +952,41 @@ def _request_microphone() -> None:
         logger.debug("Could not request microphone access")
 
 
+def _check_input_monitoring() -> bool:
+    """Check if Input Monitoring is granted by attempting to create an event tap.
+
+    This is the same technique pynput uses — ``CGEventTapCreate`` returns ``None``
+    when the process lacks Input Monitoring permission.
+    """
+    try:
+        import Quartz
+
+        tap = Quartz.CGEventTapCreate(
+            Quartz.kCGSessionEventTap,
+            Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionListenOnly,
+            Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
+            lambda _proxy, _type, event, _refcon: event,
+            None,
+        )
+        if tap is None:
+            return False
+        # Clean up — the tap is not needed beyond the check
+        core_foundation = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
+        core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+        core_foundation.CFRelease(Quartz.objc.pyobjc_id(tap))
+        return True
+    except ImportError:
+        logger.debug("Quartz not available, skipping Input Monitoring check")
+        return True
+    except Exception:
+        logger.debug("Could not check Input Monitoring permission")
+        return True
+
+
 def check_permissions_granted() -> bool:
-    """Return True if both Accessibility and Microphone permissions are granted."""
-    return _check_accessibility() and _check_microphone()
+    """Return True if Accessibility, Microphone, and Input Monitoring are granted."""
+    return _check_accessibility() and _check_microphone() and _check_input_monitoring()
 
 
 class _PermissionPanelView:
@@ -1144,7 +1189,9 @@ class PermissionGuideOverlay:
         step_index = self._pending_steps[self._current_step]
         if step_index == 0:
             return _check_accessibility()
-        return _check_microphone()
+        if step_index == 1:
+            return _check_microphone()
+        return _check_input_monitoring()
 
     def _poll_permission(self) -> None:
         """Called every 2s to check if the current permission has been granted."""
@@ -1198,6 +1245,8 @@ class PermissionGuideOverlay:
             self._pending_steps.append(0)
         if not _check_microphone():
             self._pending_steps.append(1)
+        if not _check_input_monitoring():
+            self._pending_steps.append(2)
 
         if not self._pending_steps:
             logger.info("All permissions already granted, skipping guide")

@@ -461,6 +461,24 @@ class VeeryApp(rumps.App):
             self._hotkey_listener = Listener(on_press=on_press, on_release=on_release)
             self._hotkey_listener.daemon = True
             self._hotkey_listener.start()
+
+            # pynput silently fails when Input Monitoring is denied:
+            # CGEventTapCreate returns None and the thread exits without raising.
+            # Give the thread a moment to attempt tap creation, then check.
+            time.sleep(0.3)
+            if not self._hotkey_listener.is_alive():
+                logger.error("Hotkey listener died — Input Monitoring likely denied")
+                self._set_detail("Hotkey failed — grant Input Monitoring")
+                try:
+                    rumps.notification(
+                        "Veery",
+                        "Hotkey listener failed",
+                        "Grant Input Monitoring in System Settings "
+                        "\u2192 Privacy & Security \u2192 Input Monitoring, then restart.",
+                    )
+                except Exception:
+                    logger.warning("Could not send notification for hotkey failure")
+                return
         except Exception:
             logger.exception("Failed to start hotkey listener")
             self._set_detail("Hotkey failed — check Input Monitoring")
