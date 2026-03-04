@@ -110,6 +110,18 @@ _MODIFIER_KEYS = {
 _CMD_MODIFIERS = {"Key.cmd", "Key.cmd_l", "Key.cmd_r"}
 _ALT_MODIFIERS = {"Key.alt", "Key.alt_l", "Key.alt_r"}
 
+# Maps config key_combo strings to pynput Key attributes and display labels.
+_KEY_COMBO_MAP = {
+    "right_cmd": ("cmd_r", "Right \u2318"),
+    "left_cmd": ("cmd_l", "Left \u2318"),
+    "right_alt": ("alt_r", "Right \u2325"),
+    "left_alt": ("alt_l", "Left \u2325"),
+    "right_shift": ("shift_r", "Right \u21e7"),
+    "left_shift": ("shift_l", "Left \u21e7"),
+    "right_ctrl": ("ctrl_r", "Right \u2303"),
+    "left_ctrl": ("ctrl_l", "Left \u2303"),
+}
+
 
 @dataclass
 class _ManualEditSession:
@@ -469,20 +481,25 @@ class VeeryApp(rumps.App):
             item.state = 1 if bid == backend_id else 0
 
     def _start_hotkey_listener(self) -> None:
-        """Start hotkey listener: right Cmd triggers recording (hold or toggle mode)."""
+        """Start hotkey listener using the configured key_combo."""
         try:
             from pynput.keyboard import Key, Listener
 
-            logger.info("Registering push-to-talk key: right Cmd")
+            combo = self._config.hotkey.key_combo
+            pynput_attr, label = _KEY_COMBO_MAP.get(combo, ("cmd_r", "Right \u2318"))
+            self._hotkey_label = label
+            target_key = getattr(Key, pynput_attr, Key.cmd_r)
+
+            logger.info("Registering push-to-talk key: %s (%s)", combo, label)
 
             def on_press(key):
                 self._on_global_key_press(key)
-                if key == Key.cmd_r:
+                if key == target_key:
                     self._on_key_down()
 
             def on_release(key):
                 self._on_global_key_release(key)
-                if key == Key.cmd_r:
+                if key == target_key:
                     self._on_key_up()
 
             self._hotkey_listener = Listener(on_press=on_press, on_release=on_release)
@@ -490,6 +507,15 @@ class VeeryApp(rumps.App):
             self._hotkey_listener.start()
         except Exception:
             logger.exception("Failed to start hotkey listener")
+            _run_on_main_thread(
+                lambda: setattr(self._detail_item, "title", "Hotkey failed — check Input Monitoring"),
+            )
+            rumps.notification(
+                "Veery",
+                "Hotkey listener failed",
+                "Grant Input Monitoring in System Settings "
+                "\u2192 Privacy & Security \u2192 Input Monitoring, then restart.",
+            )
 
     # ------------------------------------------------------------------
     # Global key monitoring (manual-edit auto-learn)
@@ -839,9 +865,13 @@ class VeeryApp(rumps.App):
 
     def _hotkey_hint(self) -> str:
         """Return the hotkey hint text based on current recording mode."""
+        label = getattr(self, "_hotkey_label", None)
+        if label is None:
+            combo = self._config.hotkey.key_combo
+            _, label = _KEY_COMBO_MAP.get(combo, ("cmd_r", "Right \u2318"))
         if self._recording_mode == "toggle":
-            return "Press Right \u2318 to start/stop"
-        return "Hold Right \u2318 to dictate"
+            return f"Press {label} to start/stop"
+        return f"Hold {label} to dictate"
 
     def _mode_label(self) -> str:
         """Return the mode menu item label showing the alternative mode."""
@@ -1219,7 +1249,7 @@ def main() -> None:
             write_mined_yaml,
         )
         scan_paths = [Path(p).expanduser().resolve() for p in args.mine]
-        output_path = Path(args.mine_output)
+        output_path = Path(args.mine_output).expanduser().resolve()
 
         # Mine Python terms (existing)
         results = mine_terms(scan_paths)
