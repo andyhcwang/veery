@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from veery.app import _is_repetitive_hallucination
-from veery.config import AppConfig
+from veery.config import AppConfig, STTConfig
 
 # ---------------------------------------------------------------------------
 # _is_repetitive_hallucination
@@ -603,6 +603,27 @@ class TestMenuCallbacks:
         app._recording_mode = "toggle"
         assert "Hold" in app._mode_label()
 
+    def test_build_whisper_jargon_prompt_uses_active_terms(self, app) -> None:
+        app._config = AppConfig(
+            stt=STTConfig(
+                whisper_prompt_terms_limit=2,
+                whisper_prompt_char_limit=120,
+            )
+        )
+        app._corrector.jargon.dictionary.canonical_terms = ("Veery", "Voiceflow", "PyTorch")
+
+        prompt = app._build_whisper_jargon_prompt()
+
+        assert prompt == "Technical dictation. Prefer these exact spellings: Veery, Voiceflow."
+
+    def test_cleanup_pending_stt_resources_releases_models(self, app) -> None:
+        old_stt = MagicMock()
+        app._pending_stt_cleanup = [old_stt]
+
+        app._cleanup_pending_stt_resources()
+
+        old_stt.release_resources.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # _on_quit
@@ -626,6 +647,16 @@ class TestOnQuit:
         app._hotkey_listener = None
         with patch("veery.app.rumps"):
             app._on_quit(None)  # should not crash
+
+    def test_quit_releases_current_stt(self, app) -> None:
+        old_stt = MagicMock()
+        app._stt = old_stt
+        app._hotkey_listener = None
+
+        with patch("veery.app.rumps"):
+            app._on_quit(None)
+
+        old_stt.release_resources.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

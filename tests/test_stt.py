@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -247,6 +249,54 @@ class TestWhisperSTT:
         assert stt._config.backend == "whisper"
         assert stt._config.whisper_model == "mlx-community/whisper-large-v3-turbo"
 
+    def test_transcribe_passes_language_and_prompt_hints(self) -> None:
+        """Configured language and jargon prompt should be forwarded to mlx-whisper."""
+        from veery.stt import WhisperSTT
+
+        stt = WhisperSTT(
+            STTConfig(
+                backend="whisper",
+                language="en",
+                whisper_initial_prompt="Static prompt.",
+            )
+        )
+        stt.set_runtime_hints(prompt="Runtime jargon.")
+        audio = np.random.randn(16000).astype(np.float32)
+
+        mock_sf = MagicMock()
+        mock_mlx = MagicMock()
+        mock_mlx.transcribe.return_value = {"text": "hello world"}
+
+        with (
+            patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
+            patch("veery.stt.mlx_whisper", mock_mlx, create=True),
+            patch("veery.stt.sf", mock_sf, create=True),
+        ):
+            result = stt.transcribe(audio, 16000)
+
+        assert result == "hello world"
+        call_kwargs = mock_mlx.transcribe.call_args.kwargs
+        assert call_kwargs["language"] == "en"
+        assert call_kwargs["initial_prompt"] == "Static prompt. Runtime jargon."
+
+    def test_release_resources_clears_holder_and_caches(self) -> None:
+        """release_resources() should clear the cached MLX model and flush caches."""
+        from veery.stt import WhisperSTT
+
+        stt = WhisperSTT(STTConfig(backend="whisper", whisper_model="mlx-community/whisper-small"))
+        holder = SimpleNamespace(model=object(), model_path="mlx-community/whisper-small")
+        transcribe_module = SimpleNamespace(ModelHolder=holder)
+
+        with (
+            patch("veery.stt.importlib.import_module", return_value=transcribe_module),
+            patch.dict(sys.modules, {"mlx": MagicMock()}),
+        ):
+            stt.release_resources()
+
+        assert holder.model is None
+        assert holder.model_path is None
+        assert stt._loaded is False
+
 
 # ---------------------------------------------------------------------------
 # create_stt factory
@@ -314,15 +364,23 @@ class TestSTTConfigDefaults:
         assert cfg.model_name == "iic/SenseVoiceSmall"
         assert cfg.language == "auto"
         assert cfg.device == "cpu"
+        assert cfg.whisper_use_jargon_prompt is True
+        assert cfg.whisper_prompt_terms_limit == 64
+        assert cfg.whisper_prompt_char_limit == 400
+        assert cfg.whisper_initial_prompt is None
 
     def test_stt_config_custom_values(self) -> None:
         """STTConfig accepts custom overrides."""
         cfg = STTConfig(
             backend="whisper",
             whisper_model="mlx-community/whisper-small",
+            whisper_initial_prompt="Company glossary.",
+            whisper_prompt_terms_limit=12,
         )
         assert cfg.backend == "whisper"
         assert cfg.whisper_model == "mlx-community/whisper-small"
+        assert cfg.whisper_initial_prompt == "Company glossary."
+        assert cfg.whisper_prompt_terms_limit == 12
 
 
 # ---------------------------------------------------------------------------

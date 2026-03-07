@@ -192,6 +192,8 @@ class VeeryApp(rumps.App):
         self._learner: CorrectionLearner | None = None
         self._hotkey_listener = None
         self._overlay = OverlayIndicator()
+        self._pending_stt_cleanup: list[SenseVoiceSTT | WhisperSTT] = []
+        self._stt_cleanup_lock = threading.Lock()
 
         # Last pasted text + timestamp for auto-correction detection
         self._last_pasted_text: str | None = None
@@ -328,6 +330,7 @@ class VeeryApp(rumps.App):
                 # Fast path: Whisper already cached, load directly
                 self._set_detail("Loading Whisper...")
                 self._stt = create_stt(stt_cfg)
+                self._apply_stt_runtime_hints(self._stt)
                 logger.info("STT loaded (backend=whisper, cached)")
 
             elif stt_cfg.backend == "whisper" and not whisper_cached:
@@ -339,6 +342,7 @@ class VeeryApp(rumps.App):
                 self._set_detail("Loading SenseVoice...")
                 sv_config = replace(stt_cfg, backend="sensevoice")
                 self._stt = create_stt(sv_config)
+                self._apply_stt_runtime_hints(self._stt)
                 logger.info("STT loaded (backend=sensevoice, progressive)")
 
                 # Hide download overlay before marking ready
@@ -364,6 +368,7 @@ class VeeryApp(rumps.App):
                 # SenseVoice backend: download with overlay if needed, then load
                 download_overlay = self._download_sensevoice_with_overlay(stt_cfg.model_name)
                 self._stt = create_stt(stt_cfg)
+                self._apply_stt_runtime_hints(self._stt)
                 logger.info("STT loaded (backend=sensevoice)")
 
             # Hide download overlay if it was shown
@@ -412,9 +417,12 @@ class VeeryApp(rumps.App):
 
             # Load and warm up Whisper
             new_stt = create_stt(stt_cfg)
+            self._apply_stt_runtime_hints(new_stt)
 
             if not self._whisper_download_cancelled:
+                old_stt = self._stt
                 self._stt = new_stt
+                self._queue_stt_cleanup(old_stt)
 
                 def _ui_switched():
                     self._update_stt_checkmarks("whisper")
@@ -423,6 +431,7 @@ class VeeryApp(rumps.App):
                 _run_on_main_thread(_ui_switched)
                 logger.info("Auto-switched to Whisper backend")
             else:
+                self._queue_stt_cleanup(new_stt)
                 logger.info("Whisper downloaded but user switched backend, skipping auto-switch")
                 self._set_detail("Ready")
         except Exception:
@@ -430,6 +439,78 @@ class VeeryApp(rumps.App):
             self._set_detail("Ready (Whisper failed)")
         finally:
             self._whisper_loading = False
+
+    def _build_whisper_jargon_prompt(self) -> str | None:
+        """Build a compact prompt that biases Whisper toward repo jargon spellings."""
+        if not self._config.stt.whisper_use_jargon_prompt or self._corrector is None:
+            return None
+
+        terms = self._corrector.jargon.dictionary.canonical_terms
+        if not terms:
+            return None
+
+        term_limit = max(0, self._config.stt.whisper_prompt_terms_limit)
+        char_limit = max(0, self._config.stt.whisper_prompt_char_limit)
+        if term_limit == 0 or char_limit == 0:
+            return None
+
+        prefix = "Technical dictation. Prefer these exact spellings: "
+        suffix = "."
+        if len(prefix) + len(suffix) >= char_limit:
+            return None
+
+        selected: list[str] = []
+        for term in terms:
+            cleaned = term.strip()
+            if not cleaned:
+                continue
+            candidate = prefix + ", ".join(selected + [cleaned]) + suffix
+            if len(candidate) > char_limit:
+                break
+            selected.append(cleaned)
+            if len(selected) >= term_limit:
+                break
+
+        if not selected:
+            return None
+        return prefix + ", ".join(selected) + suffix
+
+    def _apply_stt_runtime_hints(self, stt: SenseVoiceSTT | WhisperSTT | None) -> None:
+        """Push runtime hinting into the active Whisper backend."""
+        if not isinstance(stt, WhisperSTT):
+            return
+        try:
+            stt.set_runtime_hints(prompt=self._build_whisper_jargon_prompt())
+        except Exception:
+            logger.exception("Failed to apply Whisper runtime hints")
+
+    def _queue_stt_cleanup(self, stt: SenseVoiceSTT | WhisperSTT | None) -> None:
+        """Release superseded STT backends when it is safe to do so."""
+        if stt is None:
+            return
+        with self._stt_cleanup_lock:
+            self._pending_stt_cleanup.append(stt)
+        self._cleanup_pending_stt_async()
+
+    def _cleanup_pending_stt_async(self) -> None:
+        with self._state_lock:
+            if self._state != State.IDLE:
+                return
+        threading.Thread(target=self._cleanup_pending_stt_resources, daemon=True).start()
+
+    def _cleanup_pending_stt_resources(self) -> None:
+        with self._stt_cleanup_lock:
+            pending = list(self._pending_stt_cleanup)
+            self._pending_stt_cleanup.clear()
+
+        for stt in pending:
+            release = getattr(stt, "release_resources", None)
+            if not callable(release):
+                continue
+            try:
+                release()
+            except Exception:
+                logger.exception("Failed to release superseded STT backend")
 
     def _update_stt_checkmarks(self, backend_id: str) -> None:
         """Update STT menu checkmarks and internal backend state."""
@@ -821,6 +902,7 @@ class VeeryApp(rumps.App):
                 if not skip_overlay:
                     self._overlay.hide()
             _run_on_main_thread(_ui)
+            self._cleanup_pending_stt_async()
         elif new_state == State.RECORDING:
             def _ui():
                 self.title = "\U0001f534"  # red circle
@@ -1074,6 +1156,7 @@ class VeeryApp(rumps.App):
         """Reload jargon dictionaries so newly promoted terms take effect immediately."""
         try:
             self._corrector = TextCorrector(JargonCorrector(self._config.jargon))
+            self._apply_stt_runtime_hints(self._stt)
             logger.info("Reloaded TextCorrector after learning update")
         except Exception:
             logger.exception("Failed to reload TextCorrector after learning update")
@@ -1125,7 +1208,10 @@ class VeeryApp(rumps.App):
                 from dataclasses import replace
                 new_config = replace(self._config.stt, backend=backend_id)
                 new_stt = create_stt(new_config)
+                self._apply_stt_runtime_hints(new_stt)
+                old_stt = self._stt
                 self._stt = new_stt
+                self._queue_stt_cleanup(old_stt)
                 self._stt_backend = backend_id
 
                 def _ui_ok():
@@ -1201,6 +1287,10 @@ class VeeryApp(rumps.App):
         """Clean shutdown."""
         self._finalize_manual_edit_learning()
         self._discard_manual_edit_monitor()
+        current_stt = self._stt
+        self._stt = None
+        self._queue_stt_cleanup(current_stt)
+        self._cleanup_pending_stt_resources()
         if self._hotkey_listener is not None:
             self._hotkey_listener.stop()
         if self._recorder is not None and self._recorder.is_recording:

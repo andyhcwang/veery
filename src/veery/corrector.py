@@ -52,6 +52,10 @@ class TextCorrector:
     def __init__(self, jargon: JargonCorrector) -> None:
         self._jargon = jargon
 
+    @property
+    def jargon(self) -> JargonCorrector:
+        return self._jargon
+
     def correct(self, raw_text: str) -> CorrectionResult:
         """Run the full correction pipeline on raw STT output."""
         if not raw_text:

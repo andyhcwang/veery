@@ -1,4 +1,4 @@
-"""Bootstrap jargon mining from Python source code."""
+"""Bootstrap jargon mining from source code and project metadata."""
 
 from __future__ import annotations
 
@@ -344,6 +344,33 @@ _STDLIB_NAMES = frozenset({
 
 _CAMEL_RE = re.compile(r"^[A-Z][a-z]+(?:[A-Z][a-z]+)+$|^[A-Z][a-z]+(?:[A-Z]+[a-z]*)+$")
 _ALL_CAPS_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,}$")
+_TITLE_CASE_RE = re.compile(r"^[A-Z][a-z]{3,}$")
+_LOWERCASE_SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$")
+_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_-]{2,}\b")
+_CODE_SPAN_RE = re.compile(r"`([^`\n]{3,})`")
+_HEADING_RE = re.compile(r"(?m)^\s{0,3}#\s+([A-Za-z][A-Za-z0-9_-]{2,})\s*$")
+_METADATA_NAME_RE = re.compile(r"""(?im)^\s*(?:"name"|name)\s*[:=]\s*["']([A-Za-z][A-Za-z0-9_-]{2,})["']""")
+
+_TEXT_SCAN_EXTS = frozenset({
+    ".md", ".markdown", ".rst", ".txt",
+    ".toml", ".yaml", ".yml", ".json",
+    ".js", ".jsx", ".ts", ".tsx",
+    ".swift", ".go", ".rs", ".java", ".kt",
+})
+_TEXT_SCAN_NAMES = frozenset({"README", "LICENSE"})
+_TEXT_SCAN_MAX_BYTES = 1_000_000
+_REPO_NAME_MIN_LEN = 5
+_SLUG_STOPWORDS = frozenset({
+    "app", "apps", "assets", "bin", "build", "config", "configs", "dist",
+    "doc", "docs", "example", "examples", "lib", "pkg", "scripts", "src",
+    "test", "tests", "tools", "vendor",
+})
+_TITLE_CASE_STOPWORDS = frozenset({
+    "About", "After", "Before", "Build", "Built", "Code", "Config", "Copyright",
+    "Edit", "Example", "Examples", "Features", "Format", "Generated", "Guide",
+    "Input", "Install", "License", "Output", "Privacy", "Project", "Readme",
+    "Repository", "Returns", "Scanned", "Terms", "Usage", "Version",
+})
 
 
 def _is_interesting_name(name: str) -> bool:
@@ -361,6 +388,42 @@ def _is_interesting_name(name: str) -> bool:
     if _CAMEL_RE.match(name):
         return True
     return False
+
+
+def _slug_to_canonical(name: str) -> str | None:
+    """Convert a lowercase slug/project name into a canonical proper noun.
+
+    Examples:
+        "veery" -> "Veery"
+        "voice-flow" -> "VoiceFlow"
+        "src" -> None
+    """
+    trimmed = name.strip().strip("./")
+    if len(trimmed) < _REPO_NAME_MIN_LEN:
+        return None
+    if trimmed.lower() in _SLUG_STOPWORDS:
+        return None
+    if not _LOWERCASE_SLUG_RE.fullmatch(trimmed):
+        return None
+
+    parts = [part for part in re.split(r"[-_]+", trimmed) if part]
+    if not parts:
+        return None
+    return "".join(part.capitalize() for part in parts)
+
+
+def _normalize_special_text_name(name: str, *, allow_slug: bool = False) -> str | None:
+    """Normalize project names from headings/metadata with tight false-positive control."""
+    token = name.strip()
+    if not token:
+        return None
+    if _is_interesting_name(token):
+        return token
+    if _TITLE_CASE_RE.fullmatch(token) and token not in _TITLE_CASE_STOPWORDS:
+        return token
+    if allow_slug:
+        return _slug_to_canonical(token)
+    return None
 
 
 def _extract_names_from_ast(source: str) -> list[str]:
@@ -392,14 +455,88 @@ def _extract_names_from_ast(source: str) -> list[str]:
     return names
 
 
+def _extract_names_from_text(source: str) -> list[str]:
+    """Extract jargon candidates from non-Python text/config files.
+
+    This intentionally avoids scraping arbitrary prose. It only trusts:
+    - CamelCase / ALL_CAPS tokens anywhere in the file
+    - single-word H1 headings like "# Veery"
+    - code spans like `VoiceflowClient`
+    - structured metadata like `name = "veery"` or `"name": "veery"`
+    """
+    names: list[str] = []
+    source_without_code_spans = _CODE_SPAN_RE.sub(" ", source)
+
+    for token in _TOKEN_RE.findall(source_without_code_spans):
+        if _is_interesting_name(token):
+            names.append(token)
+
+    for heading in _HEADING_RE.findall(source):
+        normalized = _normalize_special_text_name(heading, allow_slug=True)
+        if normalized is not None:
+            names.append(normalized)
+
+    for raw in _METADATA_NAME_RE.findall(source):
+        normalized = _normalize_special_text_name(raw, allow_slug=True)
+        if normalized is not None:
+            names.append(normalized)
+
+    for span in _CODE_SPAN_RE.findall(source):
+        for token in _TOKEN_RE.findall(span):
+            normalized = _normalize_special_text_name(token)
+            if normalized is not None:
+                names.append(normalized)
+
+    return names
+
+
+def _is_scannable_text_file(path: Path) -> bool:
+    """Return True for common source/config/doc files worth scanning as text."""
+    return path.suffix.lower() in _TEXT_SCAN_EXTS or path.name in _TEXT_SCAN_NAMES
+
+
+def _scan_file(path: Path) -> Counter[str]:
+    """Scan one file and return extracted term counts."""
+    if path.suffix == ".py":
+        try:
+            source = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return Counter()
+        return Counter(_extract_names_from_ast(source))
+
+    if not _is_scannable_text_file(path):
+        return Counter()
+
+    try:
+        if path.stat().st_size > _TEXT_SCAN_MAX_BYTES:
+            return Counter()
+        source = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return Counter()
+
+    return Counter(_extract_names_from_text(source))
+
+
+def _root_project_name(root: Path) -> str | None:
+    """Infer a project/repo name from the scan root directory itself."""
+    if not root.name or root.name in _SKIP_DIRS:
+        return None
+    return _normalize_special_text_name(root.name, allow_slug=True)
+
+
 def _scan_directory(root: Path, max_files: int = 10_000) -> Counter[str]:
-    """Walk a directory tree, parse Python files, count term occurrences."""
+    """Walk a directory tree, scan source/config files, and count term occurrences."""
     counter: Counter[str] = Counter()
     file_count = 0
+    root_name = _root_project_name(root)
 
-    for py_file in root.rglob("*.py"):
+    for file_path in root.rglob("*"):
+        if not file_path.is_file():
+            continue
         # Skip excluded directories
-        if any(part in _SKIP_DIRS for part in py_file.parts):
+        if any(part in _SKIP_DIRS for part in file_path.parts):
+            continue
+        if file_path.suffix != ".py" and not _is_scannable_text_file(file_path):
             continue
 
         file_count += 1
@@ -407,15 +544,12 @@ def _scan_directory(root: Path, max_files: int = 10_000) -> Counter[str]:
             logger.warning("Hit file limit (%d), stopping scan", max_files)
             break
 
-        try:
-            source = py_file.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
+        counter += _scan_file(file_path)
 
-        for name in _extract_names_from_ast(source):
-            counter[name] += 1
+    if file_count > 0 and root_name is not None:
+        counter[root_name] += 1
 
-    logger.info("Scanned %d Python files", min(file_count, max_files))
+    logger.info("Scanned %d source/text files", min(file_count, max_files))
     return counter
 
 
@@ -457,13 +591,8 @@ def mine_terms(
     for path in scan_paths:
         if path.is_dir():
             combined += _scan_directory(path, max_files=max_files)
-        elif path.suffix == ".py":
-            try:
-                source = path.read_text(encoding="utf-8", errors="ignore")
-                for name in _extract_names_from_ast(source):
-                    combined[name] += 1
-            except OSError:
-                pass
+        elif path.is_file():
+            combined += _scan_file(path)
 
     # Filter out stdlib names
     for name in list(combined):

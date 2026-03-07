@@ -42,6 +42,8 @@ class JargonDictionary:
         self._config = config
         # variant (lowercased) -> canonical form
         self._reverse_index: dict[str, str] = {}
+        # Canonical terms in load order, used for prompt-building.
+        self._canonical_terms: list[str] = []
         # Variants bucketed by word count for fuzzy matching
         self._variants_by_word_count: dict[int, list[str]] = {}
 
@@ -89,6 +91,8 @@ class JargonDictionary:
         for canonical, variants in terms.items():
             if not variants:
                 continue
+            if canonical not in self._canonical_terms:
+                self._canonical_terms.append(canonical)
             for variant in variants:
                 if not isinstance(variant, str):
                     logger.warning("Skipping non-string variant %r for '%s'", variant, canonical)
@@ -150,6 +154,10 @@ class JargonDictionary:
     @property
     def reverse_index(self) -> dict[str, str]:
         return self._reverse_index
+
+    @property
+    def canonical_terms(self) -> tuple[str, ...]:
+        return tuple(self._canonical_terms)
 
 
 class JargonCorrector:

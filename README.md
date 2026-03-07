@@ -93,6 +93,23 @@ On first launch, Veery will:
 
 Hold **Right Cmd**, speak in whatever mix of languages comes naturally, release, and watch the text appear.
 
+### Build a Dev `.app` (Apple Silicon)
+
+Veery includes a `py2app` target for an **arm64-only** menubar development app bundle:
+
+```bash
+uv sync --group app
+./.venv/bin/python setup.py py2app -A
+```
+
+The app lands at `dist/Veery.app` and runs against your live checkout.
+
+Notes:
+
+- The bundle is configured as an agent app (`LSUIElement`) so it stays in the menubar without a Dock icon.
+- `NSMicrophoneUsageDescription` is embedded in the app bundle plist for macOS microphone permission prompts.
+- This is a developer/testing wrapper around the current source tree, not a fully standalone distributable app.
+
 ## The Jargon System
 
 STT models are trained on general speech — they don't know your domain vocabulary. Veery fixes this with a three-layer correction system that runs in <1ms:
