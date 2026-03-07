@@ -93,27 +93,22 @@ On first launch, Veery will:
 
 Hold **Right Cmd**, speak in whatever mix of languages comes naturally, release, and watch the text appear.
 
-### Build a `.app` (Apple Silicon)
+### Build a Dev `.app` (Apple Silicon)
 
-Veery includes a `py2app` build target for an **arm64-only** menubar app bundle:
+Veery includes a `py2app` target for an **arm64-only** menubar development app bundle:
 
 ```bash
 uv sync --group app
-./.venv/bin/python setup.py py2app
-```
-
-The built app lands at `dist/Veery.app`. For a fast development bundle that runs against your live checkout, use:
-
-```bash
 ./.venv/bin/python setup.py py2app -A
 ```
+
+The app lands at `dist/Veery.app` and runs against your live checkout.
 
 Notes:
 
 - The bundle is configured as an agent app (`LSUIElement`) so it stays in the menubar without a Dock icon.
 - `NSMicrophoneUsageDescription` is embedded in the app bundle plist for macOS microphone permission prompts.
-- The default `config.yaml` and jargon YAML files are copied into the bundle so the packaged app can boot without source files next to it.
-- Signing and notarization are a separate release step after the bundle is built.
+- This is a developer/testing wrapper around the current source tree, not a fully standalone distributable app.
 
 ## The Jargon System
 
