@@ -45,6 +45,10 @@ class STTConfig:
     device: str = "cpu"  # CPU is more reliable than MPS on macOS
     backend: str = "whisper"  # "sensevoice" or "whisper"
     whisper_model: str = "mlx-community/whisper-large-v3-turbo"
+    whisper_use_jargon_prompt: bool = True
+    whisper_prompt_terms_limit: int = 64
+    whisper_prompt_char_limit: int = 400
+    whisper_initial_prompt: str | None = None
 
 
 STT_BACKENDS: tuple[tuple[str, str], ...] = (

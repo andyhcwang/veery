@@ -9,6 +9,7 @@ import yaml
 from veery.config import JargonConfig
 from veery.miner import (
     _extract_names_from_ast,
+    _extract_names_from_text,
     _is_interesting_name,
     _load_existing_terms,
     _scan_directory,
@@ -231,6 +232,25 @@ class TestSplitCamelCase:
         assert _split_camel_case("Router") == ["Router"]
 
 
+class TestExtractNamesFromText:
+    def test_heading_extracts_single_word_project_name(self) -> None:
+        names = _extract_names_from_text("# Veery\n\nMixed-language dictation.\n")
+        assert "Veery" in names
+
+    def test_metadata_name_normalizes_lowercase_slug(self) -> None:
+        names = _extract_names_from_text('[project]\nname = "veery"\n')
+        assert "Veery" in names
+
+    def test_code_spans_extract_non_python_camelcase_terms(self) -> None:
+        names = _extract_names_from_text("Use `VoiceflowClient` from the SDK.\n")
+        assert "VoiceflowClient" in names
+
+    def test_plain_prose_title_case_is_not_scraped(self) -> None:
+        names = _extract_names_from_text("Format terms carefully in the guide.\n")
+        assert "Format" not in names
+        assert "Terms" not in names
+
+
 class TestGenerateVariants:
     """Unit tests for generate_variants()."""
 
@@ -385,6 +405,44 @@ class TestWriteMinedYaml:
 
         assert count == 0
         assert not output.exists()
+
+
+class TestMineTextAndProjectNames:
+    def test_mines_project_name_from_pyproject_metadata(self, tmp_path: Path) -> None:
+        project = tmp_path / "workspace"
+        project.mkdir()
+        (project / "pyproject.toml").write_text('[project]\nname = "veery"\n')
+
+        results = mine_terms([project], config=JargonConfig(dict_paths=(), learned_path=None))
+        result_dict = {term: (freq, known) for term, freq, known in results}
+        assert result_dict["Veery"] == (1, False)
+
+    def test_mines_root_directory_name_for_repo_slugs(self, tmp_path: Path) -> None:
+        project = tmp_path / "voiceflow"
+        project.mkdir()
+        (project / "README.md").write_text("# Getting Started\n")
+
+        results = mine_terms([project], config=JargonConfig(dict_paths=(), learned_path=None))
+        result_dict = {term: (freq, known) for term, freq, known in results}
+        assert result_dict["Voiceflow"] == (1, False)
+        assert "Getting" not in result_dict
+
+    def test_mines_camelcase_terms_from_non_python_files(self, tmp_path: Path) -> None:
+        doc = tmp_path / "README.md"
+        doc.write_text("Use `VoiceflowClient` for repo integration.\n")
+
+        results = mine_terms([doc], config=JargonConfig(dict_paths=(), learned_path=None))
+        result_dict = {term: (freq, known) for term, freq, known in results}
+        assert result_dict["VoiceflowClient"] == (1, False)
+
+    def test_metadata_stopwords_do_not_become_fake_project_names(self, tmp_path: Path) -> None:
+        project = tmp_path / "workspace"
+        project.mkdir()
+        (project / "pyproject.toml").write_text('[project]\nname = "build"\n')
+
+        results = mine_terms([project], config=JargonConfig(dict_paths=(), learned_path=None))
+        result_dict = {term: (freq, known) for term, freq, known in results}
+        assert "Build" not in result_dict
 
 
 class TestMalformedYamlRoot:

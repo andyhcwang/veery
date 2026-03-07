@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
+import importlib
 import logging
 import os
 import re
@@ -491,6 +493,11 @@ class SenseVoiceSTT:
             logger.exception("SenseVoice transcription failed")
             return ""
 
+    def release_resources(self) -> None:
+        """Drop model references so Python can reclaim backend memory."""
+        self._model = None
+        gc.collect()
+
 
 def _extract_text(result: list) -> str:
     """Extract and clean text from FunASR generate() output.
@@ -520,6 +527,7 @@ class WhisperSTT:
     def __init__(self, config: STTConfig | None = None) -> None:
         self._config = config or STTConfig()
         self._loaded = False
+        self._runtime_prompt: str | None = None
         # Pre-allocate a single temp WAV file reused across transcriptions
         # to avoid create/delete overhead on every call (~5-15ms savings).
         _f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -534,6 +542,32 @@ class WhisperSTT:
             Path(self._tmp_wav).unlink(missing_ok=True)
         except Exception:
             pass
+
+    def set_runtime_hints(self, *, prompt: str | None = None) -> None:
+        """Attach runtime prompt hints derived from active jargon."""
+        prompt = (prompt or "").strip()
+        self._runtime_prompt = prompt or None
+
+    def _build_initial_prompt(self) -> str | None:
+        parts: list[str] = []
+        static_prompt = self._config.whisper_initial_prompt
+        if static_prompt is not None:
+            static_prompt = static_prompt.strip()
+            if static_prompt:
+                parts.append(static_prompt)
+        if self._runtime_prompt is not None:
+            parts.append(self._runtime_prompt)
+        if not parts:
+            return None
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            if part in seen:
+                continue
+            seen.add(part)
+            deduped.append(part)
+        return " ".join(deduped)
 
     def load_model(self) -> None:
         """Warm up the Whisper model by running a dummy transcription.
@@ -614,22 +648,54 @@ class WhisperSTT:
             # Reuse pre-allocated temp WAV path (mlx-whisper expects a file path)
             sf.write(self._tmp_wav, audio, sample_rate)
 
+            transcribe_kwargs = {
+                "path_or_hf_repo": self._config.whisper_model,
+                # Avoid prompt feedback loops on short/noisy clips.
+                "condition_on_previous_text": False,
+                # Be more aggressive about skipping no-speech/silence windows.
+                "no_speech_threshold": 0.35,
+                "logprob_threshold": None,
+                "hallucination_silence_threshold": 0.2,
+                "temperature": 0.0,
+            }
+            if self._config.language != "auto":
+                transcribe_kwargs["language"] = self._config.language
+            initial_prompt = self._build_initial_prompt()
+            if initial_prompt is not None:
+                transcribe_kwargs["initial_prompt"] = initial_prompt
+
             result = mlx_whisper.transcribe(
                 self._tmp_wav,
-                path_or_hf_repo=self._config.whisper_model,
-                # Avoid prompt feedback loops on short/noisy clips.
-                condition_on_previous_text=False,
-                # Be more aggressive about skipping no-speech/silence windows.
-                no_speech_threshold=0.35,
-                logprob_threshold=None,
-                hallucination_silence_threshold=0.2,
-                temperature=0.0,
+                **transcribe_kwargs,
             )
             text = result.get("text", "") if isinstance(result, dict) else str(result)
             return text.strip()
         except Exception:
             logger.exception("Whisper transcription failed")
             return ""
+
+    def release_resources(self) -> None:
+        """Clear MLX Whisper model references and flush caches."""
+        try:
+            transcribe_module = importlib.import_module("mlx_whisper.transcribe")
+            holder = getattr(transcribe_module, "ModelHolder", None)
+            if holder is not None and getattr(holder, "model_path", None) == self._config.whisper_model:
+                holder.model = None
+                holder.model_path = None
+        except Exception:
+            logger.debug("Could not clear mlx-whisper model holder", exc_info=True)
+
+        try:
+            import mlx.core as mx
+
+            mx.clear_cache()
+            if hasattr(mx, "metal"):
+                mx.metal.clear_cache()
+        except Exception:
+            logger.debug("Could not clear MLX caches", exc_info=True)
+
+        self._loaded = False
+        gc.collect()
 
 
 def create_stt(config: STTConfig | None = None) -> SenseVoiceSTT | WhisperSTT:
