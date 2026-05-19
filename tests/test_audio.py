@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from veery.audio import AudioRecorder, AudioSegment, _State
+from veery.audio import AudioRecorder, AudioSegment, StopReason, _State
 from veery.config import AudioConfig, VADConfig
 
 
@@ -353,6 +353,15 @@ class TestStreamLifecycle:
             rec.start_recording()
         assert rec._stream is not None
 
+    def test_start_recording_can_skip_opening_stream(self) -> None:
+        rec = _make_recorder()
+        rec._vad_model = MagicMock()  # pre-loaded
+        with patch.object(rec, "prepare_stream") as mock_prepare:
+            rec.start_recording(open_stream_if_needed=False)
+
+        mock_prepare.assert_not_called()
+        assert rec._stream is None
+
     def test_stop_recording_closes_stream(self) -> None:
         rec = _make_recorder()
         mock_stream = MagicMock()
@@ -377,6 +386,20 @@ class TestStreamLifecycle:
 
         assert seg is not None
         mock_stream.stop.assert_called_once()
+
+    def test_stop_and_flush_preserves_manual_cap_reason(self) -> None:
+        vad_cfg = VADConfig(min_speech_duration_sec=0.05)
+        rec = _make_recorder(vad_cfg=vad_cfg)
+        mock_stream = MagicMock()
+        rec._stream = mock_stream
+        rec._raw_buffer.append(np.full(16000, 0.1, dtype=np.float32))
+        rec._state = _State.SPEECH_DETECTED
+        rec._stop_reason = StopReason.MANUAL_CAP_REACHED
+
+        seg = rec.stop_and_flush()
+
+        assert seg is not None
+        assert rec.stop_reason == StopReason.MANUAL_CAP_REACHED
 
     def test_stop_and_flush_no_speech_returns_none(self) -> None:
         """stop_and_flush returns None when raw audio is just ambient noise."""
@@ -456,6 +479,54 @@ class TestStreamLifecycle:
         assert rec.state == _State.WAITING
         assert rec._speech_frames == 0
         assert rec._silence_frames == 0
+
+    def test_long_manual_recording_does_not_drop_early_chunks(self) -> None:
+        """Manual recordings should preserve all chunks past the wait-timeout window."""
+        audio_cfg = AudioConfig(wait_timeout_sec=0.064)  # old bounded buffer = 2 chunks
+        vad_cfg = VADConfig(min_speech_duration_sec=0.05)
+        rec = _make_recorder(audio_cfg=audio_cfg, vad_cfg=vad_cfg)
+        rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.9)))
+
+        with patch("veery.audio.sd") as mock_sd:
+            mock_sd.InputStream.return_value = MagicMock()
+            rec.prepare_stream(manual_mode=True)
+
+        for _ in range(5):
+            rec._audio_callback(_chunk(0.5), 512, None, MagicMock(spec=False))
+
+        assert len(rec._buffer) == 5
+        assert len(rec._raw_buffer) == 5
+
+    def test_manual_cap_sets_stop_reason_and_event(self) -> None:
+        audio_cfg = AudioConfig(manual_max_duration_sec=0.064)
+        rec = _make_recorder(audio_cfg=audio_cfg)
+        rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.9)))
+
+        with patch("veery.audio.sd") as mock_sd:
+            mock_sd.InputStream.return_value = MagicMock()
+            rec.prepare_stream(manual_mode=True)
+
+        rec._audio_callback(_chunk(0.5), 512, None, MagicMock(spec=False))
+        assert rec.wait_for_manual_stop(timeout=0) is None
+
+        rec._audio_callback(_chunk(0.5), 512, None, MagicMock(spec=False))
+        assert rec.wait_for_manual_stop(timeout=0) == StopReason.MANUAL_CAP_REACHED
+        assert rec.stop_reason == StopReason.MANUAL_CAP_REACHED
+
+    def test_manual_cap_ignored_for_wait_mode(self) -> None:
+        audio_cfg = AudioConfig(manual_max_duration_sec=0.064)
+        rec = _make_recorder(audio_cfg=audio_cfg)
+        rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.9)))
+
+        with patch("veery.audio.sd") as mock_sd:
+            mock_sd.InputStream.return_value = MagicMock()
+            rec.prepare_stream()
+
+        for _ in range(5):
+            rec._audio_callback(_chunk(0.5), 512, None, MagicMock(spec=False))
+
+        assert rec.wait_for_manual_stop(timeout=0) is None
+        assert rec.stop_reason is None
 
 
 # ---------------------------------------------------------------------------

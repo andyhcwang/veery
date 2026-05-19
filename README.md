@@ -158,7 +158,8 @@ stt:
   backend: whisper          # "sensevoice" or "whisper" (default: whisper)
 
 audio:
-  max_duration_sec: 30.0    # Auto-stop after 30s
+  wait_timeout_sec: 30.0       # Timeout for wait-based recording flows
+  manual_max_duration_sec: null  # Optional cap for hold/toggle dictation; null = record until you stop
 
 vad:
   threshold: 0.4            # Speech detection sensitivity (lower = more sensitive)

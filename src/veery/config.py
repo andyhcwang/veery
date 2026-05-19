@@ -19,7 +19,8 @@ class AudioConfig:
     sample_rate: int = 16000
     channels: int = 1
     chunk_duration_ms: int = 32  # 32ms chunks → 512 samples at 16kHz (Silero VAD required size)
-    max_duration_sec: float = 30.0  # Max recording length before auto-stop
+    wait_timeout_sec: float = 30.0  # Timeout for wait-based recording flows
+    manual_max_duration_sec: float | None = None  # Optional hard cap for manual hold/toggle recording
     input_gain: float = 1.0  # Multiplier for input audio (increase for quiet microphones)
 
     @property
@@ -27,8 +28,8 @@ class AudioConfig:
         return int(self.sample_rate * self.chunk_duration_ms / 1000)
 
     @property
-    def max_buffer_samples(self) -> int:
-        return int(self.sample_rate * self.max_duration_sec)
+    def wait_timeout_samples(self) -> int:
+        return int(self.sample_rate * self.wait_timeout_sec)
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,24 @@ def _filter_keys(cls: type, raw: dict) -> dict:
     return {k: v for k, v in raw.items() if k in valid}
 
 
+def _normalize_audio_config(raw: dict) -> dict:
+    """Map deprecated audio keys onto the current config contract."""
+    audio_raw = dict(raw or {})
+    legacy_wait_timeout = audio_raw.pop("max_duration_sec", None)
+    if legacy_wait_timeout is None:
+        return audio_raw
+
+    if "wait_timeout_sec" in audio_raw:
+        logger.warning(
+            "audio.max_duration_sec is deprecated and ignored because audio.wait_timeout_sec is set.",
+        )
+        return audio_raw
+
+    logger.warning("audio.max_duration_sec is deprecated; use audio.wait_timeout_sec instead.")
+    audio_raw["wait_timeout_sec"] = legacy_wait_timeout
+    return audio_raw
+
+
 def load_config(config_path: Path | None = None) -> AppConfig:
     """Load config from YAML file, falling back to defaults for missing fields."""
     if config_path is None:
@@ -123,12 +142,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         with open(config_path) as f:
             raw = yaml.safe_load(f) or {}
 
+        audio_raw = _filter_keys(AudioConfig, _normalize_audio_config(raw.get("audio", {})))
         jargon_raw = _filter_keys(JargonConfig, raw.get("jargon", {}))
         if "dict_paths" in jargon_raw and isinstance(jargon_raw["dict_paths"], list):
             jargon_raw["dict_paths"] = tuple(jargon_raw["dict_paths"])
 
         cfg = AppConfig(
-            audio=AudioConfig(**_filter_keys(AudioConfig, raw.get("audio", {}))),
+            audio=AudioConfig(**audio_raw),
             vad=VADConfig(**_filter_keys(VADConfig, raw.get("vad", {}))),
             stt=STTConfig(**_filter_keys(STTConfig, raw.get("stt", {}))),
             jargon=JargonConfig(**jargon_raw),
@@ -137,17 +157,48 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             learning=LearningConfig(**_filter_keys(LearningConfig, raw.get("learning", {}))),
         )
 
-        # Validate input_gain
+        # Validate audio config.
+        audio_kwargs = dict(vars(cfg.audio))
+        rebuild_audio = False
+
+        wait_timeout = cfg.audio.wait_timeout_sec
+        if not isinstance(wait_timeout, (int, float)) or wait_timeout <= 0:
+            logger.warning(
+                "wait_timeout_sec must be a positive number (got %r), resetting to 30.0",
+                wait_timeout,
+            )
+            audio_kwargs["wait_timeout_sec"] = 30.0
+            rebuild_audio = True
+
+        manual_max_duration = cfg.audio.manual_max_duration_sec
+        if manual_max_duration is not None and (
+            not isinstance(manual_max_duration, (int, float)) or manual_max_duration <= 0
+        ):
+            logger.warning(
+                "manual_max_duration_sec must be a positive number or null (got %r), disabling it",
+                manual_max_duration,
+            )
+            audio_kwargs["manual_max_duration_sec"] = None
+            rebuild_audio = True
+
         gain = cfg.audio.input_gain
         if not isinstance(gain, (int, float)) or gain <= 0:
             logger.warning("input_gain must be a positive number (got %r), resetting to 1.0", gain)
-            audio_kwargs = {k: v for k, v in vars(cfg.audio).items() if k != "input_gain"}
             audio_kwargs["input_gain"] = 1.0
-            cfg = AppConfig(audio=AudioConfig(**audio_kwargs), vad=cfg.vad, stt=cfg.stt,
-                            jargon=cfg.jargon, hotkey=cfg.hotkey, output=cfg.output,
-                            learning=cfg.learning)
+            rebuild_audio = True
         elif gain > 100:
             logger.warning("input_gain %.1f is unusually high (max recommended: 20.0), audio may clip", gain)
+
+        if rebuild_audio:
+            cfg = AppConfig(
+                audio=AudioConfig(**audio_kwargs),
+                vad=cfg.vad,
+                stt=cfg.stt,
+                jargon=cfg.jargon,
+                hotkey=cfg.hotkey,
+                output=cfg.output,
+                learning=cfg.learning,
+            )
 
         return cfg
     except Exception:

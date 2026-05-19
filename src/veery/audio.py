@@ -41,6 +41,20 @@ class _State(enum.Enum):
     DONE = "done"  # Enough silence after speech, recording complete
 
 
+class StopReason(enum.Enum):
+    """Why the current recording session ended."""
+
+    USER_STOP = "user_stop"
+    MANUAL_CAP_REACHED = "manual_cap_reached"
+    SPEECH_END = "speech_end"
+    WAIT_TIMEOUT = "wait_timeout"
+
+
+class _CaptureMode(enum.Enum):
+    WAIT = "wait"
+    MANUAL = "manual"
+
+
 class AudioRecorder:
     """Microphone capture with Silero VAD-based speech endpoint detection.
 
@@ -74,6 +88,11 @@ class AudioRecorder:
         self._speech_frames = 0
         self._silence_frames = 0
         self._done_event = threading.Event()
+        self._manual_stop_event = threading.Event()
+        self._stop_reason: StopReason | None = None
+        self._capture_mode = _CaptureMode.WAIT
+        self._captured_samples = 0
+        self._manual_max_samples: int | None = None
 
         # Rechunk buffer: accumulates incoming audio into exact VAD-sized chunks
         self._rechunk_buf = np.zeros(self._audio_cfg.chunk_samples, dtype=np.float32)
@@ -132,7 +151,7 @@ class AudioRecorder:
     # Public API
     # ------------------------------------------------------------------
 
-    def prepare_stream(self) -> None:
+    def prepare_stream(self, *, manual_mode: bool = False) -> None:
         """Open and start the audio stream immediately (call from hotkey thread).
 
         Audio chunks are buffered via the callback even before start_recording()
@@ -143,10 +162,13 @@ class AudioRecorder:
             return  # already open
 
         with self._lock:
-            # Reset state for a new recording
-            max_chunks = int(self._audio_cfg.max_duration_sec * 1000 / self._audio_cfg.chunk_duration_ms)
-            self._buffer = deque(maxlen=max_chunks)
-            self._raw_buffer = deque(maxlen=max_chunks)
+            # Reset state for a new recording.
+            #
+            # Manual hold/toggle recordings must keep the full capture until the
+            # user stops. A bounded deque turns long dictations into a rolling
+            # window and silently drops the beginning of the paragraph.
+            self._buffer = deque()
+            self._raw_buffer = deque()
 
             # Pre-speech buffer: ~500ms worth of chunks to capture speech onset
             pre_speech_chunks = max(1, 500 // self._audio_cfg.chunk_duration_ms)
@@ -156,6 +178,16 @@ class AudioRecorder:
             self._speech_frames = 0
             self._silence_frames = 0
             self._done_event.clear()
+            self._manual_stop_event.clear()
+            self._stop_reason = None
+            self._capture_mode = _CaptureMode.MANUAL if manual_mode else _CaptureMode.WAIT
+            self._captured_samples = 0
+
+            manual_max_duration = self._audio_cfg.manual_max_duration_sec
+            if manual_mode and manual_max_duration is not None:
+                self._manual_max_samples = int(self._audio_cfg.sample_rate * manual_max_duration)
+            else:
+                self._manual_max_samples = None
 
         # Reset VAD hidden state for a fresh sequence
         if self._vad_model is not None:
@@ -174,62 +206,64 @@ class AudioRecorder:
         self._stream.start()
         logger.info("Audio stream opened and capturing.")
 
-    def start_recording(self) -> None:
+    def start_recording(self, *, manual_mode: bool = False, open_stream_if_needed: bool = True) -> None:
         """Finalize recording setup (stream should already be open via prepare_stream).
 
         If the stream isn't open yet (e.g. direct call), opens it as a fallback.
         """
         self._ensure_vad_loaded()
 
-        if self._stream is None or not self._stream.active:
-            self.prepare_stream()
+        if open_stream_if_needed and (self._stream is None or not self._stream.active):
+            self.prepare_stream(manual_mode=manual_mode)
 
         logger.info("Recording started.")
 
-    def stop_recording(self) -> AudioSegment | None:
+    def stop_recording(self, *, reason: StopReason | None = None) -> AudioSegment | None:
         """Stop the audio stream and return the captured segment.
 
         Returns None if no valid speech was detected (too short or no speech).
         """
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-            logger.info("Recording stopped.")
-
-        # Unblock any thread waiting in wait_for_speech_end()
+        self._close_stream()
+        self._set_stop_reason(reason or StopReason.WAIT_TIMEOUT)
         self._done_event.set()
+        self._manual_stop_event.set()
 
         return self._build_segment()
 
-    def stop_and_flush(self) -> AudioSegment | None:
+    def stop_and_flush(self, *, reason: StopReason = StopReason.USER_STOP) -> AudioSegment | None:
         """Stop recording and return all captured audio, using raw buffer as fallback.
 
         Use this for manual stops where the user explicitly ended recording.
         """
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-            logger.info("Recording stopped.")
-
+        self._close_stream()
+        self._set_stop_reason(reason)
         self._done_event.set()
+        self._manual_stop_event.set()
         return self._build_segment(use_raw=True)
 
     def wait_for_speech_end(self, timeout: float | None = None) -> AudioSegment | None:
         """Block until VAD detects end of speech, then return the segment.
 
         Args:
-            timeout: Maximum seconds to wait. Defaults to max_duration_sec.
+            timeout: Maximum seconds to wait. Defaults to wait_timeout_sec.
 
         Returns:
             AudioSegment if valid speech was captured, None otherwise.
         """
         if timeout is None:
-            timeout = self._audio_cfg.max_duration_sec
+            timeout = self._audio_cfg.wait_timeout_sec
 
-        self._done_event.wait(timeout=timeout)
-        return self.stop_recording()
+        completed = self._done_event.wait(timeout=timeout)
+        reason = StopReason.SPEECH_END if completed else StopReason.WAIT_TIMEOUT
+        return self.stop_recording(reason=reason)
+
+    def wait_for_manual_stop(self, timeout: float | None = None) -> StopReason | None:
+        """Block until a manual recording stop reason is available."""
+        if not self._manual_stop_event.wait(timeout=timeout):
+            return None
+
+        with self._lock:
+            return self._stop_reason
 
     @property
     def is_recording(self) -> bool:
@@ -239,6 +273,11 @@ class AudioRecorder:
     def state(self) -> _State:
         with self._lock:
             return self._state
+
+    @property
+    def stop_reason(self) -> StopReason | None:
+        with self._lock:
+            return self._stop_reason
 
     def has_speech(self, audio: np.ndarray) -> bool:
         """Run a lightweight VAD pass on a captured segment.
@@ -349,6 +388,15 @@ class AudioRecorder:
         with self._lock:
             # Always keep raw audio for manual stop fallback
             self._raw_buffer.append(chunk)
+            self._captured_samples += chunk.size
+            if (
+                self._capture_mode == _CaptureMode.MANUAL
+                and self._manual_max_samples is not None
+                and self._captured_samples >= self._manual_max_samples
+                and self._stop_reason is None
+            ):
+                self._stop_reason = StopReason.MANUAL_CAP_REACHED
+                self._manual_stop_event.set()
 
             if self._state == _State.DONE:
                 if is_speech:
@@ -396,6 +444,20 @@ class AudioRecorder:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _close_stream(self) -> None:
+        """Stop and close the current stream if it is active."""
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+            logger.info("Recording stopped.")
+
+    def _set_stop_reason(self, reason: StopReason) -> None:
+        """Record the first stop reason for this session."""
+        with self._lock:
+            if self._stop_reason is None:
+                self._stop_reason = reason
 
     def _build_segment(self, use_raw: bool = False) -> AudioSegment | None:
         """Assemble buffered chunks into an AudioSegment.

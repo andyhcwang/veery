@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -175,7 +176,8 @@ class TestConfigLoadsDefaults:
         assert config.audio.sample_rate == 16000
         assert config.audio.channels == 1
         assert config.audio.chunk_duration_ms == 32
-        assert config.audio.max_duration_sec == 30.0
+        assert config.audio.wait_timeout_sec == 30.0
+        assert config.audio.manual_max_duration_sec is None
 
         assert isinstance(config.vad, VADConfig)
         assert config.vad.threshold == 0.4
@@ -200,8 +202,8 @@ class TestConfigLoadsDefaults:
         audio = AudioConfig()
         # chunk_samples = 16000 * 32 / 1000 = 512
         assert audio.chunk_samples == 512
-        # max_buffer_samples = 16000 * 30 = 480000
-        assert audio.max_buffer_samples == 480000
+        # wait_timeout_samples = 16000 * 30 = 480000
+        assert audio.wait_timeout_samples == 480000
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +218,8 @@ class TestConfigFromYAML:
             audio:
               sample_rate: 44100
               channels: 2
-              max_duration_sec: 60.0
+              wait_timeout_sec: 60.0
+              manual_max_duration_sec: 120.0
             vad:
               threshold: 0.7
               silence_duration_sec: 2.0
@@ -237,7 +240,8 @@ class TestConfigFromYAML:
 
         assert config.audio.sample_rate == 44100
         assert config.audio.channels == 2
-        assert config.audio.max_duration_sec == 60.0
+        assert config.audio.wait_timeout_sec == 60.0
+        assert config.audio.manual_max_duration_sec == 120.0
         assert config.vad.threshold == 0.7
         assert config.vad.silence_duration_sec == 2.0
         assert config.stt.model_name == "custom/model"
@@ -245,6 +249,35 @@ class TestConfigFromYAML:
         assert config.jargon.dict_paths == ("custom/dict.yaml",)
         assert config.jargon.fuzzy_threshold == 90
         assert config.output.cgevent_char_limit == 1000
+
+    def test_legacy_max_duration_maps_to_wait_timeout(self, tmp_path: Path, caplog) -> None:
+        yaml_content = textwrap.dedent("""\
+            audio:
+              max_duration_sec: 45.0
+        """)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml_content)
+
+        with caplog.at_level(logging.WARNING):
+            config = load_config(config_file)
+
+        assert config.audio.wait_timeout_sec == 45.0
+        assert "audio.max_duration_sec is deprecated" in caplog.text
+
+    def test_wait_timeout_wins_over_legacy_max_duration(self, tmp_path: Path, caplog) -> None:
+        yaml_content = textwrap.dedent("""\
+            audio:
+              max_duration_sec: 45.0
+              wait_timeout_sec: 90.0
+        """)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml_content)
+
+        with caplog.at_level(logging.WARNING):
+            config = load_config(config_file)
+
+        assert config.audio.wait_timeout_sec == 90.0
+        assert "ignored because audio.wait_timeout_sec is set" in caplog.text
 
     def test_config_from_yaml_whisper_backend(self, tmp_path: Path) -> None:
         """Verify YAML override for STT whisper backend fields."""
@@ -287,7 +320,8 @@ class TestConfigPartialYAML:
 
         # Default-filled fields
         assert config.audio.channels == 1  # default
-        assert config.audio.max_duration_sec == 30.0  # default
+        assert config.audio.wait_timeout_sec == 30.0  # default
+        assert config.audio.manual_max_duration_sec is None
         assert config.vad.threshold == 0.4  # entire section defaulted
         assert config.stt.model_name == "iic/SenseVoiceSmall"  # default
         assert config.jargon.fuzzy_threshold == 82  # default
@@ -305,6 +339,7 @@ class TestConfigPartialYAML:
 
         config = load_config(config_file)
         assert config.audio.sample_rate == 16000
+        assert config.audio.wait_timeout_sec == 30.0
 
 
 # ---------------------------------------------------------------------------

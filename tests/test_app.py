@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
 from veery.app import _is_repetitive_hallucination
+from veery.audio import StopReason
 from veery.config import AppConfig, STTConfig
 
 # ---------------------------------------------------------------------------
@@ -184,6 +185,7 @@ class TestBeginRecording:
             app._begin_recording()
 
         assert app._state == State.RECORDING
+        app._recorder.prepare_stream.assert_called_once_with(manual_mode=True)
 
     def test_begin_recording_noop_when_not_idle(self, app) -> None:
         from veery.app import State
@@ -232,7 +234,17 @@ class TestHoldMode:
 
         app._on_key_up()
 
-        app._recorder.stop_and_flush.assert_called_once()
+        app._recorder.stop_and_flush.assert_called_once_with(reason=StopReason.USER_STOP)
+
+    def test_key_up_does_not_wait_for_background_start(self, app) -> None:
+        app._state = app._state.__class__("recording")  # State.RECORDING
+        app._recording_started.wait = MagicMock(return_value=False)
+        app._recorder.stop_and_flush.return_value = None
+
+        app._on_key_up()
+
+        app._recording_started.wait.assert_not_called()
+        app._recorder.stop_and_flush.assert_called_once_with(reason=StopReason.USER_STOP)
 
     def test_key_up_noop_when_idle(self, app) -> None:
         from veery.app import State
@@ -267,7 +279,19 @@ class TestToggleMode:
 
         app._on_toggle_key()
 
-        app._recorder.stop_and_flush.assert_called_once()
+        app._recorder.stop_and_flush.assert_called_once_with(reason=StopReason.USER_STOP)
+
+    def test_toggle_stop_does_not_wait_for_background_start(self, app) -> None:
+        from veery.app import State
+        app._recording_mode = "toggle"
+        app._state = State.RECORDING
+        app._recording_started.wait = MagicMock(return_value=False)
+        app._recorder.stop_and_flush.return_value = None
+
+        app._on_toggle_key()
+
+        app._recording_started.wait.assert_not_called()
+        app._recorder.stop_and_flush.assert_called_once_with(reason=StopReason.USER_STOP)
 
     def test_toggle_noop_during_processing(self, app) -> None:
         from veery.app import State
@@ -283,6 +307,51 @@ class TestToggleMode:
 # ---------------------------------------------------------------------------
 
 
+class TestStartRecording:
+    def test_start_recording_uses_manual_mode(self, app) -> None:
+        app._start_recording()
+
+        app._recorder.start_recording.assert_called_once_with(manual_mode=True, open_stream_if_needed=False)
+
+    def test_start_recording_spawns_manual_cap_watcher_when_configured(self, app) -> None:
+        from veery.app import State
+
+        app._state = State.RECORDING
+        app._config = replace(
+            app._config,
+            audio=replace(app._config.audio, manual_max_duration_sec=60.0),
+        )
+
+        with patch("veery.app.threading.Thread") as mock_thread:
+            watcher = MagicMock()
+            mock_thread.return_value = watcher
+            app._start_recording()
+
+        app._recorder.start_recording.assert_called_once_with(manual_mode=True, open_stream_if_needed=False)
+        watcher.start.assert_called_once()
+
+
+class TestManualCapWatcher:
+    def test_watch_manual_stop_ignores_user_stop(self, app) -> None:
+        app._recorder.wait_for_manual_stop.return_value = StopReason.USER_STOP
+
+        with patch.object(app, "_stop_recording") as mock_stop:
+            app._watch_manual_stop()
+
+        mock_stop.assert_not_called()
+
+    def test_watch_manual_stop_handles_manual_cap(self, app) -> None:
+        from veery.app import State
+
+        app._state = State.RECORDING
+        app._recorder.wait_for_manual_stop.return_value = StopReason.MANUAL_CAP_REACHED
+
+        with patch.object(app, "_stop_recording") as mock_stop:
+            app._watch_manual_stop()
+
+        mock_stop.assert_called_once_with(reason=StopReason.MANUAL_CAP_REACHED)
+
+
 class TestStopRecording:
     def test_stop_recording_no_speech(self, app) -> None:
         from veery.app import State
@@ -292,6 +361,7 @@ class TestStopRecording:
         app._stop_recording()
 
         app._overlay.show_warning.assert_called_with("No speech detected")
+        app._recorder.stop_and_flush.assert_called_once_with(reason=StopReason.USER_STOP)
         assert app._state == State.IDLE
 
     def test_stop_recording_with_speech_transitions_to_processing(self, app) -> None:
@@ -306,6 +376,31 @@ class TestStopRecording:
             app._stop_recording()
 
         assert app._state == State.PROCESSING
+        app._recorder.stop_and_flush.assert_called_once_with(reason=StopReason.USER_STOP)
+        mock_instance.start.assert_called_once()
+
+    def test_stop_recording_manual_cap_shows_message_and_processes(self, app) -> None:
+        from veery.app import State
+
+        app._state = State.RECORDING
+        seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
+        app._recorder.stop_and_flush.return_value = seg
+
+        with (
+            patch("veery.app.threading.Thread") as mock_thread,
+            patch("veery.app.rumps.notification") as mock_notification,
+        ):
+            mock_instance = MagicMock()
+            mock_thread.return_value = mock_instance
+            app._stop_recording(reason=StopReason.MANUAL_CAP_REACHED)
+
+        assert app._state == State.PROCESSING
+        app._recorder.stop_and_flush.assert_called_once_with(reason=StopReason.MANUAL_CAP_REACHED)
+        mock_notification.assert_called_once_with(
+            "Veery",
+            "Recording stopped",
+            "Max dictation length reached",
+        )
         mock_instance.start.assert_called_once()
 
     def test_stop_recording_no_recorder(self, app) -> None:

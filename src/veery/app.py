@@ -18,7 +18,7 @@ import numpy as np
 import rumps
 
 from veery import __version__, sounds
-from veery.audio import AudioRecorder, AudioSegment
+from veery.audio import AudioRecorder, AudioSegment, StopReason
 from veery.config import PROJECT_ROOT, STT_BACKENDS, AppConfig, load_config
 from veery.corrector import TextCorrector
 from veery.jargon import JargonCorrector
@@ -131,6 +131,8 @@ class VeeryApp(rumps.App):
         # State machine
         self._state = State.IDLE
         self._state_lock = threading.Lock()
+        self._recording_finalizing = False
+        self._recording_session_id = 0
 
         # Menu items
         self._status_item = rumps.MenuItem(f"Veery v{__version__}", callback=None)
@@ -892,6 +894,7 @@ class VeeryApp(rumps.App):
         with self._state_lock:
             old_state = self._state
             self._state = new_state
+            self._recording_finalizing = False
 
         logger.info("State: %s -> %s", old_state.value, new_state.value)
 
@@ -958,7 +961,6 @@ class VeeryApp(rumps.App):
         with self._state_lock:
             if self._state != State.RECORDING:
                 return
-        self._recording_started.wait(timeout=10)
         self._stop_recording()
 
     def _begin_recording(self) -> None:
@@ -972,6 +974,9 @@ class VeeryApp(rumps.App):
             if self._state != State.IDLE:
                 return
             self._state = State.RECORDING  # set immediately to avoid race
+            self._recording_finalizing = False
+            self._recording_session_id += 1
+            session_id = self._recording_session_id
 
         self._recording_started.clear()
         # Update UI for recording state
@@ -987,13 +992,13 @@ class VeeryApp(rumps.App):
 
         if self._recorder is not None:
             try:
-                self._recorder.prepare_stream()
+                self._recorder.prepare_stream(manual_mode=True)
             except Exception:
                 logger.exception("Failed to prepare audio stream")
                 self._recording_started.set()  # unblock any waiting _on_key_up
                 self._set_state(State.IDLE)
                 return
-        threading.Thread(target=self._start_recording, daemon=True).start()
+        threading.Thread(target=self._start_recording, args=(session_id,), daemon=True).start()
 
     def _on_hold_key_down(self) -> None:
         """Hold mode: start recording on key press."""
@@ -1006,36 +1011,80 @@ class VeeryApp(rumps.App):
         if current == State.IDLE:
             self._begin_recording()
         elif current == State.RECORDING:
-            self._recording_started.wait(timeout=10)
             self._stop_recording()
 
-    def _start_recording(self) -> None:
+    def _is_active_recording_session(self, session_id: int | None) -> bool:
+        """Return True if a background helper still belongs to the current recording."""
+        with self._state_lock:
+            return (
+                self._state == State.RECORDING
+                and not self._recording_finalizing
+                and (session_id is None or session_id == self._recording_session_id)
+            )
+
+    def _start_recording(self, session_id: int | None = None) -> None:
         """Finalize recording setup (state is already RECORDING, stream may already be open)."""
         if self._recorder is None:
-            rumps.notification("Veery", "Error", "Audio recorder not available")
-            self._recording_started.set()
-            self._set_state(State.IDLE)
+            if self._is_active_recording_session(session_id):
+                rumps.notification("Veery", "Error", "Audio recorder not available")
+                self._recording_started.set()
+                self._set_state(State.IDLE)
             return
 
         try:
-            self._recorder.start_recording()
+            self._recorder.start_recording(manual_mode=True, open_stream_if_needed=False)
+            if not self._is_active_recording_session(session_id):
+                return
             self._recording_started.set()
+            if self._config.audio.manual_max_duration_sec is not None:
+                threading.Thread(target=self._watch_manual_stop, args=(session_id,), daemon=True).start()
         except Exception as e:
+            if not self._is_active_recording_session(session_id):
+                return
             logger.exception("Failed to start recording")
             self._recording_started.set()  # Unblock key_up even on failure
             rumps.notification("Veery", "Error", str(e))
             self._set_state(State.IDLE)
 
-    def _stop_recording(self) -> None:
+    def _watch_manual_stop(self, session_id: int | None = None) -> None:
+        """Watch for recorder-driven manual stop reasons such as a max-duration cap."""
+        recorder = self._recorder
+        if recorder is None:
+            return
+
+        reason = recorder.wait_for_manual_stop()
+        if reason != StopReason.MANUAL_CAP_REACHED:
+            return
+
+        if not self._is_active_recording_session(session_id):
+            return
+
+        self._stop_recording(reason=reason)
+
+    def _stop_recording(self, *, reason: StopReason = StopReason.USER_STOP) -> None:
         """Stop the current recording and process all captured audio."""
-        logger.info("Recording stopped by user, processing...")
+        with self._state_lock:
+            if self._state != State.RECORDING or self._recording_finalizing:
+                return
+            self._recording_finalizing = True
+
+        logger.info("Recording stopped (%s), processing...", reason.value)
         sounds.play_stop()
         if self._recorder is None:
             self._set_state(State.IDLE)
             return
-        segment = self._recorder.stop_and_flush()
+
+        stop_message = None
+        if reason == StopReason.MANUAL_CAP_REACHED:
+            stop_message = "Max dictation length reached"
+            try:
+                rumps.notification("Veery", "Recording stopped", stop_message)
+            except Exception:
+                logger.warning("Could not send max-duration notification", exc_info=True)
+
+        segment = self._recorder.stop_and_flush(reason=reason)
         if segment is None:
-            self._overlay.show_warning("No speech detected")
+            self._overlay.show_warning(stop_message or "No speech detected")
             self._set_state(State.IDLE, skip_overlay=True)
             return
         # Transition to PROCESSING synchronously so a rapid re-press of the
