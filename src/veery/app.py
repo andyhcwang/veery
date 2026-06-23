@@ -270,6 +270,8 @@ class VeeryApp(rumps.App):
     def _on_permissions_granted(self) -> None:
         """Called when all permissions are granted (from PermissionGuideOverlay)."""
         logger.info("Permissions granted, starting model loading...")
+        if self._hotkey_listener is None or not self._hotkey_listener.is_alive():
+            self._start_hotkey_listener()
         self._set_detail("Loading models...")
         threading.Thread(target=self._load_models, daemon=True).start()
 

@@ -56,6 +56,7 @@ OPTIONS = {
     ],
     "includes": [
         "AppKit",
+        "AVFoundation",
         "Cocoa",
         "Foundation",
         "Quartz",

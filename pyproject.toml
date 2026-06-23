@@ -37,6 +37,7 @@ dependencies = [
     # macOS app
     "rumps>=0.4",
     "pynput>=1.7",
+    "pyobjc-framework-AVFoundation>=10.0",
     "pyobjc-framework-Cocoa>=10.0",
     "pyobjc-framework-Quartz>=10.0",
 ]
