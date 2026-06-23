@@ -255,6 +255,23 @@ class TestHoldMode:
 
 
 # ---------------------------------------------------------------------------
+# Permission flow
+# ---------------------------------------------------------------------------
+
+
+class TestPermissionFlow:
+    def test_permissions_granted_restarts_dead_hotkey_listener(self, app) -> None:
+        dead_listener = MagicMock()
+        dead_listener.is_alive.return_value = False
+        app._hotkey_listener = dead_listener
+
+        with patch.object(app, "_start_hotkey_listener") as mock_start:
+            app._on_permissions_granted()
+
+        mock_start.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # _on_toggle_key
 # ---------------------------------------------------------------------------
 

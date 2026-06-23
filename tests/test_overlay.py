@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -260,6 +261,12 @@ class TestOverlayIndicator:
         overlay = OverlayIndicator()
         with _patch_run_on_main_sync():
             overlay.hide()  # should not raise
+
+
+class TestPermissionDependencies:
+    def test_avfoundation_available_for_microphone_permission_flow(self):
+        """Microphone permission checks need AVFoundation at runtime."""
+        importlib.import_module("AVFoundation")
 
 
 class TestOverlayConstants:
