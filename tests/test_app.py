@@ -5,14 +5,18 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 from threading import Event, Thread
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
-from veery.app import _is_repetitive_hallucination
+from veery.app import VeeryApp, _is_repetitive_hallucination
 from veery.audio import StopReason
 from veery.config import AppConfig, STTConfig
+from veery.jargon import JargonUsageTracker
+
+_ORIGINAL_START_HOTKEY_LISTENER = VeeryApp._start_hotkey_listener
 
 # ---------------------------------------------------------------------------
 # _is_repetitive_hallucination
@@ -115,8 +119,6 @@ def app():
     for p in patches:
         p.start()
 
-    from veery.app import VeeryApp
-
     vf_app = VeeryApp(AppConfig())
     # Simulate model loading complete
     vf_app._ready.set()
@@ -179,6 +181,26 @@ class TestStateMachine:
         app._overlay.hide.reset_mock()
         app._set_state(State.IDLE, skip_overlay=True)
         app._overlay.hide.assert_not_called()
+
+    @pytest.mark.parametrize("state_name", ["IDLE", "RECORDING"])
+    def test_leave_processing_state_rejects_non_processing_state(
+        self, app, state_name: str
+    ) -> None:
+        from veery.app import State
+
+        original_state = State[state_name]
+        app._state = original_state
+
+        assert app._leave_processing_state(skip_overlay=True) is False
+        assert app._state is original_state
+
+    def test_leave_processing_state_changes_processing_to_idle(self, app) -> None:
+        from veery.app import State
+
+        app._state = State.PROCESSING
+
+        assert app._leave_processing_state(skip_overlay=True) is True
+        assert app._state is State.IDLE
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +285,34 @@ class TestHoldMode:
         app._state = State.IDLE
         app._on_key_up()
         app._recorder.stop_and_flush.assert_not_called()
+
+
+class TestHotkeyListener:
+    def test_press_callback_contains_handler_exceptions(self, app) -> None:
+        target_key = object()
+        listener = MagicMock()
+        listener.is_alive.return_value = True
+        listener_factory = MagicMock(return_value=listener)
+        keyboard_module = SimpleNamespace(
+            Key=SimpleNamespace(cmd_r=target_key),
+            Listener=listener_factory,
+        )
+        pynput_module = SimpleNamespace(keyboard=keyboard_module)
+        app._on_key_down = MagicMock(side_effect=RuntimeError("key handler failed"))
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {"pynput": pynput_module, "pynput.keyboard": keyboard_module},
+            ),
+            patch("veery.app.time.sleep"),
+        ):
+            _ORIGINAL_START_HOTKEY_LISTENER(app)
+
+        on_press = listener_factory.call_args.kwargs["on_press"]
+        on_press(target_key)
+
+        app._on_key_down.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +630,46 @@ class TestProcessSegment:
         assert app._state == State.IDLE
         assert app._session_count == 0
 
+    def test_process_segment_stt_error_reports_transcription_failure(self, app) -> None:
+        from veery.app import State
+        from veery.stt import STTError
+
+        app._state = State.PROCESSING
+        app._recorder.has_speech.return_value = True
+        app._stt.transcribe.side_effect = STTError("backend unavailable")
+        app._overlay.show_warning.reset_mock()
+        seg = FakeSegment(audio=np.ones(16000, dtype=np.float32), sample_rate=16000)
+
+        app._process_segment(seg, generation=1)
+
+        warning = app._overlay.show_warning.call_args.args[0]
+        assert "Transcription failed" in warning
+        assert "No speech detected" not in warning
+        assert app._state is State.IDLE
+
+    def test_process_segment_cancelled_during_correction_does_not_paste(self, app) -> None:
+        from veery.app import State
+
+        app._state = State.PROCESSING
+        app._recorder.has_speech.return_value = True
+        app._stt.transcribe.return_value = "hello"
+        seg = FakeSegment(audio=np.ones(16000, dtype=np.float32), sample_rate=16000)
+
+        def cancel_generation(_raw_text: str) -> MagicMock:
+            with app._processing_lock:
+                app._cancelled_processing_generation = 1
+            return MagicMock(final="hello")
+
+        app._corrector.correct.side_effect = cancel_generation
+
+        with (
+            patch("veery.app._check_accessibility", return_value=True),
+            patch("veery.app.paste_to_active_app") as paste,
+        ):
+            app._process_segment(seg, generation=1)
+
+        paste.assert_not_called()
+
     def test_process_segment_no_corrector(self, app) -> None:
         """When corrector is None, raw text is pasted directly."""
         from veery.app import State
@@ -704,15 +794,18 @@ class TestProcessingWatchdog:
         app._processing_generation = 1
 
         def blocked_transcribe(*_args) -> str:
+            entered.set()
             release.wait(timeout=1)
             return "late text"
 
+        entered = Event()
         app._stt.transcribe.side_effect = blocked_transcribe
         app._corrector.correct.return_value = MagicMock(final="late text")
         app_module.paste_to_active_app.reset_mock()
         segment = FakeSegment(audio=np.ones(16000, dtype=np.float32), sample_rate=16000)
         worker = Thread(target=app._process_segment, args=(segment, 1), daemon=True)
         worker.start()
+        assert entered.wait(timeout=1)
         return worker, release
 
     def test_watchdog_resets_processing_state_to_idle(self, app) -> None:
@@ -742,6 +835,87 @@ class TestProcessingWatchdog:
         finally:
             release.set()
             worker.join(timeout=1)
+
+    def test_late_worker_does_not_stomp_newer_processing_session(self, app) -> None:
+        import veery.app as app_module
+        from veery.app import State
+
+        worker, release = self._start_blocked_worker(app)
+        try:
+            app._watch_processing(worker, generation=1)
+            with app._processing_lock:
+                app._processing_generation = 2
+                app._state = State.PROCESSING
+
+            release.set()
+            worker.join(timeout=1)
+
+            assert worker.is_alive() is False
+            assert app._state is State.PROCESSING
+            app_module.paste_to_active_app.assert_not_called()
+        finally:
+            release.set()
+            worker.join(timeout=1)
+
+    def test_completed_worker_is_not_cancelled_or_reported_as_timed_out(self, app) -> None:
+        worker = Thread(target=lambda: None, daemon=True)
+        worker.start()
+        worker.join(timeout=1)
+        app._overlay.show_warning.reset_mock()
+
+        with patch.object(app, "_notify") as notify:
+            app._watch_processing(worker, generation=1)
+
+        assert app._is_processing_cancelled(1) is False
+        notify.assert_not_called()
+        app._overlay.show_warning.assert_not_called()
+
+
+class TestJargonUsageRecording:
+    @staticmethod
+    def _use_real_tracker(app, tmp_path) -> JargonUsageTracker:
+        tracker = JargonUsageTracker(tmp_path / "usage_stats.yaml")
+        app._usage_tracker = tracker
+        app._corrector.jargon.dictionary.canonical_terms = [
+            "API",
+            "DuckDB",
+            "夏普比率",
+        ]
+        return tracker
+
+    def test_ascii_term_is_recorded_on_word_boundary(self, app, tmp_path) -> None:
+        tracker = self._use_real_tracker(app, tmp_path)
+
+        app._record_jargon_usage("the API call")
+
+        assert tracker._stats["API"]["count"] == 1
+        assert "DuckDB" not in tracker._stats
+
+    def test_ascii_term_is_not_recorded_inside_another_word(self, app, tmp_path) -> None:
+        tracker = self._use_real_tracker(app, tmp_path)
+
+        app._record_jargon_usage("capitalized calls")
+
+        assert tracker._stats == {}
+
+    def test_cjk_term_is_recorded_by_substring(self, app, tmp_path) -> None:
+        tracker = self._use_real_tracker(app, tmp_path)
+
+        app._record_jargon_usage("用夏普比率算一下")
+
+        assert tracker._stats["夏普比率"]["count"] == 1
+
+    def test_fifth_record_refreshes_runtime_hints(self, app, tmp_path) -> None:
+        self._use_real_tracker(app, tmp_path)
+
+        with patch.object(app, "_apply_stt_runtime_hints") as apply_hints:
+            for _ in range(4):
+                app._record_jargon_usage("the API call")
+            apply_hints.assert_not_called()
+
+            app._record_jargon_usage("the API call")
+
+        apply_hints.assert_called_once_with(app._stt)
 
 
 # ---------------------------------------------------------------------------
@@ -994,6 +1168,39 @@ class TestOnQuit:
 
 
 class TestSTTBackendSwitch:
+    def test_cancelled_background_whisper_load_keeps_current_stt(self, app) -> None:
+        old_stt = MagicMock(name="old_stt")
+        new_stt = MagicMock(name="new_stt")
+        app._stt = old_stt
+        app._whisper_download_cancelled = True
+
+        with (
+            patch("veery.app.ensure_model_downloaded") as ensure_downloaded,
+            patch("veery.app.create_stt", return_value=new_stt),
+            patch.object(app, "_queue_stt_cleanup") as queue_cleanup,
+        ):
+            app._load_whisper_background()
+
+        ensure_downloaded.assert_called_once()
+        assert app._stt is old_stt
+        queue_cleanup.assert_called_once_with(new_stt)
+
+    def test_active_background_whisper_load_swaps_and_cleans_up_old_stt(self, app) -> None:
+        old_stt = MagicMock(name="old_stt")
+        new_stt = MagicMock(name="new_stt")
+        app._stt = old_stt
+        app._whisper_download_cancelled = False
+
+        with (
+            patch("veery.app.ensure_model_downloaded"),
+            patch("veery.app.create_stt", return_value=new_stt),
+            patch.object(app, "_queue_stt_cleanup") as queue_cleanup,
+        ):
+            app._load_whisper_background()
+
+        assert app._stt is new_stt
+        queue_cleanup.assert_called_once_with(old_stt)
+
     def test_select_same_backend_noop(self, app) -> None:
         app._stt_backend = "whisper"
         app._stt = MagicMock()  # not None
@@ -1033,3 +1240,25 @@ class TestSTTBackendSwitch:
         # Should NOT spawn a new thread — let the background download auto-switch
         mock_thread.assert_not_called()
         assert app._whisper_download_cancelled is False
+
+    def test_switch_failure_keeps_current_stt_and_releases_switch_claim(self, app) -> None:
+        class InlineThread:
+            def __init__(self, *, target, daemon) -> None:
+                self._target = target
+
+            def start(self) -> None:
+                self._target()
+
+        old_stt = MagicMock(name="old_stt")
+        app._stt = old_stt
+        app._stt_backend = "sensevoice"
+
+        with (
+            patch("veery.app.threading.Thread", InlineThread),
+            patch("veery.app.create_stt", side_effect=RuntimeError("load failed")),
+        ):
+            app._on_select_stt_backend("whisper", None)
+
+        assert app._stt is old_stt
+        assert app._stt_switching is False
+        assert "switch failed" in app._detail_item.title.lower()

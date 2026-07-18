@@ -33,6 +33,14 @@ _hf_download_lock = threading.Lock()
 class DownloadStalled(Exception):
     """Download progress stopped for too long."""
 
+
+class STTError(Exception):
+    """The STT backend failed (as opposed to the audio containing no speech).
+
+    Callers must surface this distinctly: reporting a broken backend as
+    "no speech detected" tells the user the opposite of the truth.
+    """
+
 # Regex to strip SenseVoice special tokens: language, emotion, and event tags.
 # Examples: <|zh|>, <|en|>, <|HAPPY|>, <|BGM|>, <|Speech|>, <|Applause|>
 _TAG_PATTERN = re.compile(r"<\|[^|]*\|>")
@@ -481,8 +489,7 @@ class SenseVoiceSTT:
             Cleaned transcription string, or "" on error.
         """
         if self._model is None:
-            logger.error("SenseVoice model not loaded, returning empty string")
-            return ""
+            raise STTError("SenseVoice model not loaded")
 
         if audio.size == 0:
             return ""
@@ -493,10 +500,10 @@ class SenseVoiceSTT:
                 language=self._config.language,
                 use_itn=True,
             )
-            return _extract_text(result)
-        except Exception:
+        except Exception as exc:
             logger.exception("SenseVoice transcription failed")
-            return ""
+            raise STTError("SenseVoice transcription failed") from exc
+        return _extract_text(result)
 
     def release_resources(self) -> None:
         """Drop model references so Python can reclaim backend memory."""
@@ -526,9 +533,10 @@ def _strip_tags(text: str) -> str:
 class WhisperSTT:
     """Wrapper around mlx-whisper for multilingual-robust STT on Apple Silicon.
 
-    The energy pre-check is a last-ditch silence gate only: the VAD already
-    vouched for the segment upstream, so thresholds sit far below any real
-    speech (even from quiet mics) and only catch true digital silence.
+    The energy pre-check is a last-ditch silence gate only: audio reaching it
+    already passed either the recording-time VAD or the raw-fallback energy
+    heuristic, so thresholds sit far below any real speech (even from quiet
+    mics) and only catch near-silence.
     """
     _MIN_RMS_ENERGY = 0.003
     _MIN_ACTIVE_FRAME_RMS = 0.008
@@ -660,13 +668,15 @@ class WhisperSTT:
                 )
             return ""
 
-        if not _is_model_cached(self._config.whisper_model):
-            logger.error(
-                "Whisper model %s is not cached; skipping transcription to avoid "
-                "a silent in-transcribe download (run ensure_model_downloaded first)",
-                self._config.whisper_model,
+        # Once the model is loaded in memory, mlx-whisper serves it from its
+        # ModelHolder and never re-downloads — so only gate on the cache while
+        # unloaded. (Re-checking every call would let a stray .incomplete blob
+        # dropped by another process disable a perfectly working model.)
+        if not self._loaded and not _is_model_cached(self._config.whisper_model):
+            raise STTError(
+                f"Whisper model {self._config.whisper_model} is not downloaded; "
+                "refusing a silent in-transcribe download"
             )
-            return ""
 
         tmp_path: str | None = None
         try:
@@ -705,11 +715,12 @@ class WhisperSTT:
                 tmp_path,
                 **transcribe_kwargs,
             )
+            self._loaded = True
             text = result.get("text", "") if isinstance(result, dict) else str(result)
             return text.strip()
-        except Exception:
+        except Exception as exc:
             logger.exception("Whisper transcription failed")
-            return ""
+            raise STTError("Whisper transcription failed") from exc
         finally:
             if tmp_path is not None:
                 Path(tmp_path).unlink(missing_ok=True)
@@ -742,9 +753,10 @@ def create_stt(config: STTConfig | None = None) -> SenseVoiceSTT | WhisperSTT:
     """Factory: return the right STT backend based on config.backend.
 
     Raises:
-        RuntimeError: If the requested backend failed to load. Callers must
-            surface this — a half-constructed backend would silently return
-            "" for every transcription.
+        RuntimeError (whisper) or the backend's original load exception
+        (sensevoice) when the requested backend failed to load. Callers must
+        surface this — a half-constructed backend would silently return
+        "" for every transcription.
     """
     config = config or STTConfig()
     if config.backend not in ("whisper", "sensevoice"):

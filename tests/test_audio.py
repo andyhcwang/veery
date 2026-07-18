@@ -66,6 +66,16 @@ class TestVADStateMachine:
         assert np.allclose(loud, 0.5 * 1.96)
         assert np.allclose(quiet, 0.05 * 5.0)
 
+    def test_input_gain_below_one_is_a_noop(self) -> None:
+        rec = _make_recorder(audio_cfg=AudioConfig(input_gain=0.5))
+        samples = np.linspace(-0.8, 0.8, 512, dtype=np.float32).reshape(-1, 1)
+
+        with patch.object(rec, "_process_vad_chunk") as process_chunk:
+            rec._audio_callback(samples, 512, None, MagicMock(spec=False))
+
+        processed = process_chunk.call_args.args[0]
+        assert np.array_equal(processed, samples[:, 0])
+
     def test_speech_transitions_to_speech_detected(self) -> None:
         rec = _make_recorder()
         rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.9)))

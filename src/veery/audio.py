@@ -296,10 +296,11 @@ class AudioRecorder:
         This is used as a second-stage gate before STT to avoid sending
         near-silent/manual-stop clips that can trigger Whisper hallucinations.
 
-        Deliberately lenient: the recording-time VAD already accepted this
-        audio, so this pass only needs to reject true silence/noise. A
-        stricter re-gate here would silently drop quiet or accented speech
-        (VAD probabilities differ slightly between passes).
+        Deliberately lenient: audio reaching this gate already passed either
+        the recording-time VAD or the raw-fallback energy heuristic, so this
+        pass only needs to reject true silence/noise. A stricter re-gate here
+        would silently drop quiet or accented speech (VAD probabilities
+        differ slightly between passes).
         """
         if audio.size < self._audio_cfg.chunk_samples:
             return False
@@ -345,6 +346,8 @@ class AudioRecorder:
             return False
 
         duration_sec = audio.size / self._audio_cfg.sample_rate
+        # 2 consecutive frames = 64ms of sustained speech probability; the
+        # old active-ratio gate penalized long holds with short utterances.
         min_frames = 2 if duration_sec < 1.0 else 3
         return speech_frames >= min_frames and max_consecutive >= 2
 
@@ -376,7 +379,9 @@ class AudioRecorder:
         # so a loud microphone is never driven into clipping distortion, while
         # quiet mics still get the full boost.
         if self._audio_cfg.input_gain != 1.0:
-            peak = float(np.max(np.abs(mono)))
+            # Scalar reductions only — np.abs() would allocate a temp array,
+            # which the RT callback must not do.
+            peak = float(max(mono.max(), -mono.min()))
             gain = self._audio_cfg.input_gain
             if peak > 1e-6:
                 gain = min(gain, 0.98 / peak)
@@ -484,10 +489,15 @@ class AudioRecorder:
             return
         self._stream = None
         try:
-            stream.stop()
-            stream.close()
+            try:
+                stream.stop()
+            finally:
+                # close() must run even when stop() raises, or the PortAudio
+                # stream object leaks after a device dropout.
+                stream.close()
         except Exception:
             logger.exception("Error closing audio stream (device disconnected?)")
+            return
         logger.info("Recording stopped.")
 
     def _set_stop_reason(self, reason: StopReason) -> None:

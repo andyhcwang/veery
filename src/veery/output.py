@@ -30,9 +30,10 @@ def _type_via_cgevent(text: str) -> None:
 
         event_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
         # Zero the synthesized event's modifier flags. Otherwise, if the user's
-        # physical Cmd is still held (toggle mode releases Right-Cmd to stop
-        # recording, then typing starts ms later), the OS combines the hardware
-        # modifier state with our keystrokes, turning typed text into Cmd shortcuts.
+        # physical Cmd is still held (toggle mode stops recording on the
+        # Right-Cmd *press*, so typing can start while the key is still down),
+        # the OS combines the hardware modifier state with our keystrokes,
+        # turning typed text into Cmd shortcuts.
         Quartz.CGEventSetFlags(event_down, 0)
         Quartz.CGEventKeyboardSetUnicodeString(event_down, utf16_len, batch)
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_down)

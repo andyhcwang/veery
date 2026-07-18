@@ -33,6 +33,7 @@ from veery.overlay import (
 )
 from veery.stt import (
     SenseVoiceSTT,
+    STTError,
     WhisperSTT,
     _is_model_cached,
     _is_sensevoice_cached,
@@ -103,8 +104,9 @@ def _is_repetitive_hallucination(text: str) -> bool:
     """Detect repetitive Whisper hallucination (e.g. 'Why Why Why...').
 
     Returns True when a single word accounts for >85% of an 8+ word sequence.
-    Real hallucination loops repeat dozens of times; the thresholds are set
-    high enough that deliberate repetition ("yes yes yes yes yes yes") passes.
+    Real hallucination loops repeat dozens of times; the length gate lets
+    short deliberate repetition (<=7 words) through, while 8+ near-identical
+    words are treated as hallucination.
     """
     words = text.split()
     if len(words) < 8:
@@ -224,8 +226,10 @@ class VeeryApp(rumps.App):
         self._ready = threading.Event()
 
         # Progressive loading: tracks background Whisper download.
-        # _stt_swap_lock guards the swap flags and the _stt reference swap
-        # itself (menu clicks on the main thread race the background loader).
+        # _stt_swap_lock guards _whisper_download_cancelled, the
+        # _stt_switching claim/release, and the _stt reference swap (menu
+        # clicks on the main thread race the background loader).
+        # _whisper_loading is a best-effort flag touched only by the loader.
         self._whisper_loading: bool = False
         self._whisper_download_cancelled: bool = False
         self._stt_switching: bool = False
@@ -1086,7 +1090,8 @@ class VeeryApp(rumps.App):
             if self._is_active_recording_session(session_id):
                 self._notify("Veery", "Error", "Audio recorder not available")
                 self._recording_started.set()
-                self._set_state(State.IDLE)
+                self._overlay.show_warning("Recorder unavailable")
+                self._set_state(State.IDLE, skip_overlay=True)
             return
 
         try:
@@ -1102,7 +1107,8 @@ class VeeryApp(rumps.App):
             logger.exception("Failed to start recording")
             self._recording_started.set()  # Unblock key_up even on failure
             self._notify("Veery", "Error", str(e))
-            self._set_state(State.IDLE)
+            self._overlay.show_warning("Recording failed")
+            self._set_state(State.IDLE, skip_overlay=True)
 
     def _watch_manual_stop(self, session_id: int | None = None) -> None:
         """Watch for recorder-driven manual stop reasons such as a max-duration cap."""
@@ -1168,11 +1174,14 @@ class VeeryApp(rumps.App):
         """Watchdog: if processing hangs (STT stall), return the app to IDLE.
 
         The hung worker thread cannot be killed, but cancelling its generation
-        makes it discard its result instead of pasting stale text later.
+        makes it discard its result: the worker re-checks cancellation right
+        after transcribe and again just before the paste. (A stall inside
+        paste_to_active_app itself remains unguarded — nothing can be checked
+        after the irreversible side effect starts.)
         """
         worker.join(timeout=self._config.stt.processing_timeout_sec)
         if not worker.is_alive():
-            return
+            return  # completed in time — never mark this generation cancelled
 
         with self._processing_lock:
             if generation != self._processing_generation:
@@ -1195,13 +1204,19 @@ class VeeryApp(rumps.App):
     def _leave_processing_state(self, *, skip_overlay: bool) -> bool:
         """Compare-and-set PROCESSING -> IDLE.
 
-        A watchdog-abandoned worker can wake up minutes later, when a newer
-        recording session owns the state machine — an unconditional
-        _set_state(IDLE) there would stomp that session. Returns True when
-        the transition actually happened.
+        Guards the narrow races the generation staleness check can't: a
+        worker that passed its staleness check an instant before the watchdog
+        cancelled it, and the watchdog racing a normally-completing worker.
+        An unconditional _set_state(IDLE) in either case would stomp the
+        state a newer session owns. Returns True when the transition
+        actually happened.
         """
         with self._state_lock:
             if self._state != State.PROCESSING:
+                logger.warning(
+                    "PROCESSING->IDLE transition skipped: state is %s (concurrent owner)",
+                    self._state.value,
+                )
                 return False
             self._state = State.IDLE
             self._recording_finalizing = False
@@ -1265,6 +1280,7 @@ class VeeryApp(rumps.App):
             stt = self._stt
             if stt is None:
                 self._notify("Veery", "Error", "STT model not available")
+                _warn("STT not ready")
                 return
 
             raw_text = stt.transcribe(segment.audio, segment.sample_rate)
@@ -1307,6 +1323,13 @@ class VeeryApp(rumps.App):
                 _warn("No Accessibility permission")
                 return
 
+            # Last cancellation check before the irreversible side effect: a
+            # watchdog that fired during correction must not paste stale text.
+            if self._is_processing_cancelled(generation):
+                logger.warning("Discarding cancelled generation %d before paste", generation)
+                warned = True
+                return
+
             paste_to_active_app(final_text, self._config.output)
             # Learning runs AFTER the paste: a learning failure must never
             # cost the user their dictated text.
@@ -1324,9 +1347,16 @@ class VeeryApp(rumps.App):
             self._session_count += 1
             success = True
 
+        except STTError as e:
+            # Backend failure is NOT "no speech" — say so, or the user blames
+            # their microphone and re-dictates into a broken backend.
+            logger.error("STT backend failed: %s", e)
+            self._notify("Veery", "Transcription failed", str(e))
+            _warn("Transcription failed — see log")
         except Exception as e:
             logger.exception("Processing failed")
             self._notify("Veery", "Error", str(e))
+            _warn("Processing failed — see log")
         finally:
             # Nothing before the state transition may raise, or the app would
             # stay stuck in PROCESSING forever.
@@ -1354,23 +1384,31 @@ class VeeryApp(rumps.App):
     def _record_jargon_usage(self, final_text: str) -> None:
         """Track which canonical jargon terms appeared in the final output.
 
-        Feeds the frequency/recency ranking used by the Whisper prompt so the
-        model is biased toward vocabulary the user actually dictates.
+        ASCII terms are matched on word boundaries (so "API" doesn't count
+        inside "capitalize"); CJK and mixed terms use substring matching
+        since CJK has no word boundaries. Feeds the frequency/recency ranking
+        used by the Whisper prompt so the model is biased toward vocabulary
+        the user actually dictates.
         """
         if self._usage_tracker is None or self._corrector is None or not final_text:
             return
+        import re
+
         text_lower = final_text.lower()
-        used = [
-            term
-            for term in self._corrector.jargon.dictionary.canonical_terms
-            if term.lower() in text_lower
-        ]
+        used = []
+        for term in self._corrector.jargon.dictionary.canonical_terms:
+            term_lower = term.lower()
+            if re.fullmatch(r"[\w\s]+", term_lower, re.ASCII):
+                if re.search(rf"\b{re.escape(term_lower)}\b", text_lower):
+                    used.append(term)
+            elif term_lower in text_lower:
+                used.append(term)
         if not used:
             return
         flushed = self._usage_tracker.record(used)
         if flushed:
             # Refresh the Whisper prompt ranking now and then (piggybacks on
-            # the tracker's debounced flush cadence).
+            # the tracker's batched flush cadence — every Nth dictation).
             self._apply_stt_runtime_hints(self._stt)
 
     def _try_auto_learn(self, new_text: str) -> None:
@@ -1489,7 +1527,8 @@ class VeeryApp(rumps.App):
                 logger.exception("Failed to switch STT backend to %s", backend_id)
                 self._set_detail("Ready (STT switch failed)")
             finally:
-                self._stt_switching = False
+                with self._stt_swap_lock:
+                    self._stt_switching = False
 
         threading.Thread(target=_switch, daemon=True).start()
 

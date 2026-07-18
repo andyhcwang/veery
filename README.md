@@ -104,7 +104,8 @@ bash scripts/install_app.sh
 
 Then press **Cmd+Space**, type "Veery", hit Enter. The bundle runs against
 your live checkout — pulling new code takes effect on the next launch, no
-rebuild needed.
+rebuild needed (run `uv sync` after dependency changes; re-run the script
+only if the checkout moves).
 
 ### Build a Dev `.app` manually (Apple Silicon)
 

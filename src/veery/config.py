@@ -51,7 +51,7 @@ class STTConfig:
     whisper_prompt_char_limit: int = 400
     whisper_initial_prompt: str | None = None
     # Watchdog: max seconds a dictation may spend in PROCESSING before the
-    # app force-resets to IDLE (recovers from STT hangs / stalled downloads).
+    # app force-resets to IDLE (recovers from backend hangs).
     processing_timeout_sec: float = 120.0
 
 
@@ -92,7 +92,7 @@ class HotkeyConfig:
 @dataclass(frozen=True)
 class OutputConfig:
     cgevent_char_limit: int = 500  # Use CGEvent typing below this, clipboard above
-    paste_delay_ms: int = 50  # Delay between clipboard write and Cmd+V
+    paste_delay_ms: int = 50  # Post-Cmd+V wait before clipboard restore (values <150 clamped to 150; see output.py)
 
 
 @dataclass(frozen=True)

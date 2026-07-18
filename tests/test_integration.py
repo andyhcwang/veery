@@ -123,8 +123,8 @@ class TestPipelineSTTFails:
             mock_stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
 
     def test_real_stt_transcribe_handles_internal_errors(self) -> None:
-        """SenseVoiceSTT.transcribe() catches exceptions and returns '' gracefully."""
-        from veery.stt import SenseVoiceSTT
+        """SenseVoiceSTT wraps generate failures in STTError."""
+        from veery.stt import SenseVoiceSTT, STTError
 
         # Create STT with a mock model that raises during generate()
         with patch("veery.stt.SenseVoiceSTT._load_model"):
@@ -132,19 +132,19 @@ class TestPipelineSTTFails:
             stt._model = MagicMock()
             stt._model.generate.side_effect = RuntimeError("inference failure")
 
-            result = stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
-            assert result == ""
+            with pytest.raises(STTError, match="SenseVoice transcription failed"):
+                stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
 
-    def test_stt_with_no_model_returns_empty(self) -> None:
-        """If model failed to load (_model is None), transcribe returns ''."""
-        from veery.stt import SenseVoiceSTT
+    def test_stt_with_no_model_raises_stt_error(self) -> None:
+        """If model failed to load (_model is None), transcribe raises STTError."""
+        from veery.stt import SenseVoiceSTT, STTError
 
         with patch("veery.stt.SenseVoiceSTT._load_model"):
             stt = SenseVoiceSTT(STTConfig())
             stt._model = None
 
-            result = stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
-            assert result == ""
+            with pytest.raises(STTError, match="SenseVoice model not loaded"):
+                stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
 
 
 # ---------------------------------------------------------------------------

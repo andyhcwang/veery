@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 _EN_FILLERS = [
     r"\bum\b", r"\buh\b", r"\bumm\b", r"\buhh\b",
 ]
-# 嗯/呃 never form real words. 额 does (金额, 额度, 额外), so it is only a
-# filler when not adjacent to another CJK character.
+# 嗯 never forms real words; 呃 essentially never does in dictation (呃逆 is
+# rare medical vocabulary we accept losing). 额 does form real words (金额,
+# 额度, 额外), so it is only a filler when not adjacent to another CJK char.
 _CJK_RANGE = "一-鿿"
 _ZH_FILLERS = [
     "嗯", "呃",

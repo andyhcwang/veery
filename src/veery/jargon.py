@@ -275,12 +275,12 @@ class JargonCorrector:
 
 
 class JargonUsageTracker:
-    """Tracks per-term usage frequency and recency (Wispr Flow-style).
+    """Tracks per-term usage frequency and recency.
 
-    Terms that the user actually dictates get priority in the Whisper
-    initial-prompt (which is capped at ~64 terms / 400 chars), so the
+    Terms the user actually dictates get priority in the length-capped
+    Whisper initial-prompt (see STTConfig.whisper_prompt_*), so the
     vocabulary the model is biased toward adapts to real usage over time.
-    Stats persist to a small YAML file next to learned.yaml.
+    Stats persist to the YAML file the caller supplies.
     """
 
     def __init__(self, stats_path: Path | str, *, flush_every: int = 5) -> None:

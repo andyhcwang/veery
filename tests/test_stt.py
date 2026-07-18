@@ -64,9 +64,9 @@ class TestWhisperSTT:
         result = stt.transcribe(np.array([], dtype=np.float32), 16000)
         assert result == ""
 
-    def test_transcribe_exception_returns_empty(self) -> None:
-        """When mlx_whisper.transcribe raises, WhisperSTT returns ''."""
-        from veery.stt import WhisperSTT
+    def test_transcribe_exception_raises_stt_error(self) -> None:
+        """When mlx_whisper.transcribe raises, WhisperSTT raises STTError."""
+        from veery.stt import STTError, WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         audio = np.random.randn(16000).astype(np.float32)
@@ -79,10 +79,9 @@ class TestWhisperSTT:
             patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
             patch("veery.stt.mlx_whisper", mock_mlx, create=True),
             patch("veery.stt.sf", mock_sf, create=True),
+            pytest.raises(STTError, match="Whisper transcription failed"),
         ):
-            result = stt.transcribe(audio, 16000)
-
-        assert result == ""
+            stt.transcribe(audio, 16000)
 
     def test_transcribe_uses_fresh_temp_files_and_unlinks_them(self) -> None:
         """Each call gets an isolated WAV path that is removed afterward."""
@@ -112,7 +111,7 @@ class TestWhisperSTT:
 
     def test_transcribe_temp_file_is_unlinked_after_error(self) -> None:
         """The per-call WAV is removed even when transcription raises."""
-        from veery.stt import WhisperSTT
+        from veery.stt import STTError, WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         audio = np.random.randn(16000).astype(np.float32)
@@ -128,16 +127,18 @@ class TestWhisperSTT:
 
         import soundfile as sf
 
-        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": sf}):
-            result = stt.transcribe(audio, 16000)
+        with (
+            patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": sf}),
+            pytest.raises(STTError, match="Whisper transcription failed"),
+        ):
+            stt.transcribe(audio, 16000)
 
-        assert result == ""
         assert len(created_paths) == 1
         assert created_paths[0] != stt._tmp_wav
         assert Path(created_paths[0]).exists() is False
 
     def test_transcribe_returns_early_when_model_not_cached(self) -> None:
-        from veery.stt import WhisperSTT
+        from veery.stt import STTError, WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         audio = np.ones(16000, dtype=np.float32)
@@ -147,12 +148,33 @@ class TestWhisperSTT:
         with (
             patch("veery.stt._is_model_cached", return_value=False),
             patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
+            pytest.raises(STTError, match="is not downloaded"),
         ):
-            result = stt.transcribe(audio, 16000)
+            stt.transcribe(audio, 16000)
 
-        assert result == ""
         mock_sf.write.assert_not_called()
         mock_mlx.transcribe.assert_not_called()
+
+    def test_transcribe_skips_cache_check_after_successful_load(self) -> None:
+        """An in-memory model remains usable if the on-disk cache later changes."""
+        from veery.stt import WhisperSTT
+
+        stt = WhisperSTT(STTConfig(backend="whisper"))
+        audio = np.ones(16000, dtype=np.float32)
+        mock_sf = MagicMock()
+        mock_mlx = MagicMock()
+        mock_mlx.transcribe.return_value = {"text": "hello"}
+
+        with (
+            patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
+            patch("veery.stt._is_model_cached", return_value=True) as is_cached,
+        ):
+            assert stt.transcribe(audio, 16000) == "hello"
+            is_cached.return_value = False
+            assert stt.transcribe(audio, 16000) == "hello"
+
+        is_cached.assert_called_once_with(stt._config.whisper_model)
+        assert mock_mlx.transcribe.call_count == 2
 
     def test_load_model_warmup(self) -> None:
         """load_model() transcribes a silent wav to warm up, sets _loaded."""

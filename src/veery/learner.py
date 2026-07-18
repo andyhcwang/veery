@@ -126,16 +126,26 @@ class CorrectionLearner:
         self._save()
 
         if count >= self._promotion_threshold:
-            self._promote(variant, canonical)
-            return canonical
+            if self._promote(variant, canonical):
+                return canonical
+            # Save failed: keep the pending entry so the promotion retries on
+            # the next correction, and don't report false "Learned!" success.
+            return None
 
         return None
 
-    def _promote(self, variant: str, canonical: str) -> None:
-        """Move a correction from pending to the terms section of learned.yaml."""
+    def _promote(self, variant: str, canonical: str) -> bool:
+        """Move a correction from pending to the terms section of learned.yaml.
+
+        Returns True only when the promotion was actually persisted, so the
+        caller never announces "Learned!" for a term that isn't on disk.
+        """
         logger.info("Promoting learned term: '%s' -> '%s'", variant, canonical)
 
         data = self._load_yaml()
+        if data is None:
+            logger.warning("learned.yaml unreadable; skipping promotion to avoid data loss")
+            return False
         terms = data.setdefault("terms", {})
 
         # Add variant to canonical's list
@@ -157,14 +167,23 @@ class CorrectionLearner:
             filtered.append(e)
         data["pending"] = filtered
 
-        # Also remove from in-memory pending
+        # Also remove from in-memory pending only after a successful save, so
+        # a failed write leaves the promotion eligible to retry.
+        if not self._save_yaml(data):
+            return False
         self._pending.pop((variant, canonical), None)
-
-        self._save_yaml(data)
+        return True
 
     def _save(self) -> None:
         """Save current pending corrections to learned.yaml."""
         data = self._load_yaml()
+        if data is None:
+            # The file exists but can't be read (permissions blip, hand-edit
+            # syntax error, cloud-sync hiccup). Writing now would replace the
+            # user's entire accumulated terms section with an empty one —
+            # skip the save rather than destroy data.
+            logger.warning("learned.yaml unreadable; skipping pending save to avoid data loss")
+            return
 
         # Rebuild pending section from in-memory state
         pending_list = []
@@ -179,30 +198,39 @@ class CorrectionLearner:
 
         self._save_yaml(data)
 
-    def _load_yaml(self) -> dict:
-        """Load learned.yaml or return empty structure."""
+    def _load_yaml(self) -> dict | None:
+        """Load learned.yaml.
+
+        Returns {} when the file doesn't exist (safe to write fresh), and
+        None when it exists but is unreadable/malformed — callers must NOT
+        write in that case, or a transient read error would permanently
+        erase the user's learned terms on the next read-modify-write.
+        """
         if self._learned_path.exists():
             try:
                 with open(self._learned_path) as f:
                     data = yaml.safe_load(f) or {}
             except Exception:
-                logger.warning("learned.yaml unreadable, treating as empty", exc_info=True)
-                return {}
+                logger.warning("learned.yaml unreadable", exc_info=True)
+                return None
             if not isinstance(data, dict):
-                logger.warning("learned.yaml root is not a dict, treating as empty: %s", type(data).__name__)
-                return {}
+                logger.warning("learned.yaml root is not a dict: %s", type(data).__name__)
+                return None
             return data
         return {}
 
-    def _save_yaml(self, data: dict) -> None:
+    def _save_yaml(self, data: dict) -> bool:
         """Write data to learned.yaml, creating parent dirs if needed.
 
-        A failed save must never break dictation (callers run on hot paths), so
-        errors are logged rather than raised.
+        A failed save must never break dictation (callers run on hot paths),
+        so errors are logged rather than raised. Returns True on success so
+        callers can avoid reporting false "Learned!" signals.
         """
         try:
             self._learned_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._learned_path, "w") as f:
                 yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            return True
         except Exception:
             logger.exception("Failed to save learned.yaml; correction not persisted")
+            return False
