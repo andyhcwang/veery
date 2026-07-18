@@ -35,3 +35,4 @@ docs/
 # Auto-generated jargon (user-specific)
 jargon/mined.yaml
 jargon/learned.yaml
+jargon/usage_stats.yaml

@@ -11,27 +11,33 @@ from veery.jargon import JargonCorrector
 logger = logging.getLogger(__name__)
 
 # Filler words/phrases to remove (case-insensitive, word-boundary-aware).
-# Combined into a single alternation regex for one-pass removal instead
-# of iterating 15 separate patterns sequentially.
+# Only unambiguous fillers are removed unconditionally. Words that carry real
+# meaning ("basically", "you know", 那个, 啊, 就是说) must never be blanket-
+# stripped — dictation must not delete words the user actually said.
 _EN_FILLERS = [
     r"\bum\b", r"\buh\b", r"\bumm\b", r"\buhh\b",
-    r"\byou know\b", r"\bI mean\b",
-    r"\bbasically\b", r"\bliterally\b",
 ]
+# 嗯 never forms real words; 呃 essentially never does in dictation (呃逆 is
+# rare medical vocabulary we accept losing). 额 does form real words (金额,
+# 额度, 额外), so it is only a filler when not adjacent to another CJK char.
+_CJK_RANGE = "一-鿿"
 _ZH_FILLERS = [
-    "嗯", "额", "啊", "呃",
-    "那个", "就是说", "然后吧",
+    "嗯", "呃",
+    f"(?<![{_CJK_RANGE}])额(?![{_CJK_RANGE}])",
 ]
 _FILLER_PATTERN = re.compile(
-    "|".join(_EN_FILLERS + [re.escape(f) for f in _ZH_FILLERS]),
+    "|".join(_EN_FILLERS + _ZH_FILLERS),
     re.IGNORECASE,
 )
+# Stuttered 那个那个(那个)... is filler; a single 那个 is a real demonstrative.
+_NAGE_STUTTER = re.compile(r"(?:那个\s*){2,}")
 # Clean up multiple spaces left after removal
 _MULTI_SPACE = re.compile(r"  +")
 
 
 def remove_fillers(text: str) -> str:
     """Remove common filler words/sounds from transcribed text."""
+    text = _NAGE_STUTTER.sub("那个", text)
     text = _FILLER_PATTERN.sub("", text)
     text = _MULTI_SPACE.sub(" ", text).strip()
     return text

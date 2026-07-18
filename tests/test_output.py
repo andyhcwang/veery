@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
+
+import pytest
 
 from veery.config import OutputConfig
 
@@ -113,6 +115,33 @@ class TestTypeViaCGEvent:
         utf16_len = first_call[0][1]
         assert utf16_len == 2  # surrogate pair
 
+    def test_clears_flags_on_every_event_before_posting(self) -> None:
+        mock_quartz = MagicMock()
+        events = [object() for _ in range(4)]
+        mock_quartz.CGEventCreateKeyboardEvent.side_effect = events
+
+        with patch.dict("sys.modules", {"Quartz": mock_quartz}):
+            from veery.output import _type_via_cgevent
+
+            _type_via_cgevent("a" * 21)  # Two batches, each with down/up events.
+
+        assert mock_quartz.CGEventSetFlags.call_args_list == [
+            call(event, 0) for event in events
+        ]
+        flag_and_post_calls = [
+            event_call
+            for event_call in mock_quartz.method_calls
+            if event_call[0] in {"CGEventSetFlags", "CGEventPost"}
+        ]
+        assert flag_and_post_calls == [
+            expected_call
+            for event in events
+            for expected_call in (
+                call.CGEventSetFlags(event, 0),
+                call.CGEventPost(mock_quartz.kCGAnnotatedSessionEventTap, event),
+            )
+        ]
+
 
 # ---------------------------------------------------------------------------
 # _paste_via_clipboard
@@ -162,3 +191,26 @@ class TestPasteViaClipboard:
         assert mock_pb.clearContents.call_count == 2
         # writeObjects_ called to restore
         mock_pb.writeObjects_.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("paste_delay_sec", "expected_delay"),
+        [(0.05, 0.15), (0.3, 0.3)],
+    )
+    def test_paste_delay_has_safety_floor(
+        self, paste_delay_sec: float, expected_delay: float
+    ) -> None:
+        mock_quartz = MagicMock()
+        mock_appkit = MagicMock()
+        mock_pb = MagicMock()
+        mock_appkit.NSPasteboard.generalPasteboard.return_value = mock_pb
+        mock_pb.pasteboardItems.return_value = []
+
+        with (
+            patch.dict("sys.modules", {"Quartz": mock_quartz, "AppKit": mock_appkit}),
+            patch("veery.output.time.sleep") as sleep,
+        ):
+            from veery.output import _paste_via_clipboard
+
+            _paste_via_clipboard("hello", paste_delay_sec=paste_delay_sec)
+
+        sleep.assert_called_once_with(expected_delay)

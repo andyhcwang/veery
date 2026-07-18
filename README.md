@@ -93,7 +93,21 @@ On first launch, Veery will:
 
 Hold **Right Cmd**, speak in whatever mix of languages comes naturally, release, and watch the text appear.
 
-### Build a Dev `.app` (Apple Silicon)
+### Launch from Spotlight (Cmd+Space → "Veery")
+
+One command builds the dev `.app` and installs it to `/Applications` so
+Spotlight can launch it:
+
+```bash
+bash scripts/install_app.sh
+```
+
+Then press **Cmd+Space**, type "Veery", hit Enter. The bundle runs against
+your live checkout — pulling new code takes effect on the next launch, no
+rebuild needed (run `uv sync` after dependency changes; re-run the script
+only if the checkout moves).
+
+### Build a Dev `.app` manually (Apple Silicon)
 
 Veery includes a `py2app` target for an **arm64-only** menubar development app bundle:
 
@@ -103,6 +117,8 @@ uv sync --group app
 ```
 
 The app lands at `dist/Veery.app` and runs against your live checkout.
+Only alias mode (`-A`) is supported — a full standalone py2app build would
+break config/jargon path resolution (see `src/veery/config.py` PROJECT_ROOT).
 
 Notes:
 

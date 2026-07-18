@@ -123,8 +123,8 @@ class TestPipelineSTTFails:
             mock_stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
 
     def test_real_stt_transcribe_handles_internal_errors(self) -> None:
-        """SenseVoiceSTT.transcribe() catches exceptions and returns '' gracefully."""
-        from veery.stt import SenseVoiceSTT
+        """SenseVoiceSTT wraps generate failures in STTError."""
+        from veery.stt import SenseVoiceSTT, STTError
 
         # Create STT with a mock model that raises during generate()
         with patch("veery.stt.SenseVoiceSTT._load_model"):
@@ -132,19 +132,19 @@ class TestPipelineSTTFails:
             stt._model = MagicMock()
             stt._model.generate.side_effect = RuntimeError("inference failure")
 
-            result = stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
-            assert result == ""
+            with pytest.raises(STTError, match="SenseVoice transcription failed"):
+                stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
 
-    def test_stt_with_no_model_returns_empty(self) -> None:
-        """If model failed to load (_model is None), transcribe returns ''."""
-        from veery.stt import SenseVoiceSTT
+    def test_stt_with_no_model_raises_stt_error(self) -> None:
+        """If model failed to load (_model is None), transcribe raises STTError."""
+        from veery.stt import SenseVoiceSTT, STTError
 
         with patch("veery.stt.SenseVoiceSTT._load_model"):
             stt = SenseVoiceSTT(STTConfig())
             stt._model = None
 
-            result = stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
-            assert result == ""
+            with pytest.raises(STTError, match="SenseVoice model not loaded"):
+                stt.transcribe(np.zeros(16000, dtype=np.float32), 16000)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +296,48 @@ class TestConfigFromYAML:
         # Defaults preserved for other STT fields
         assert config.stt.model_name == "iic/SenseVoiceSmall"
         assert config.stt.language == "auto"
+
+    def test_invalid_runtime_settings_reset_to_safe_defaults(self, tmp_path: Path, caplog) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            textwrap.dedent("""\
+                vad:
+                  threshold: 1.0
+                  silence_duration_sec: 0
+                  min_speech_duration_sec: -0.1
+                stt:
+                  backend: unknown
+                  processing_timeout_sec: 0
+                jargon:
+                  fuzzy_threshold: 82.5
+                hotkey:
+                  key_combo: space
+                  mode: latch
+            """)
+        )
+
+        with caplog.at_level(logging.WARNING):
+            config = load_config(config_file)
+
+        assert config.stt.backend == "whisper"
+        assert config.stt.processing_timeout_sec == 120.0
+        assert config.vad.threshold == 0.4
+        assert config.vad.silence_duration_sec == 2.0
+        assert config.vad.min_speech_duration_sec == 0.3
+        assert config.jargon.fuzzy_threshold == 82
+        assert config.hotkey.key_combo == "right_cmd"
+        assert config.hotkey.mode == "hold"
+        for setting in (
+            "stt.backend",
+            "stt.processing_timeout_sec",
+            "vad.threshold",
+            "vad.silence_duration_sec",
+            "vad.min_speech_duration_sec",
+            "jargon.fuzzy_threshold",
+            "hotkey.key_combo",
+            "hotkey.mode",
+        ):
+            assert setting in caplog.text
 
 
 # ---------------------------------------------------------------------------

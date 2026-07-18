@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -149,6 +150,14 @@ class TestNoCorrectionWhenEmpty:
 
 
 class TestLoadPendingMalformedYaml:
+    def test_unparseable_yaml_starts_with_empty_pending(self, tmp_path: Path) -> None:
+        learned_path = tmp_path / "learned.yaml"
+        learned_path.write_text("pending: [unterminated")
+
+        learner = CorrectionLearner(_make_config(tmp_path))
+
+        assert learner._pending == {}
+
     def test_non_dict_yaml_root(self, tmp_path: Path) -> None:
         """If learned.yaml root is not a dict (e.g., a list), learner loads with empty pending."""
         learned_path = tmp_path / "learned.yaml"
@@ -200,7 +209,7 @@ class TestLoadPendingMalformedYaml:
 
 class TestLoadYamlNonDictRoot:
     def test_save_with_non_dict_yaml_root(self, tmp_path: Path) -> None:
-        """If learned.yaml becomes a list, _save() still works (treats as empty)."""
+        """Pending saves never clobber an existing non-dict YAML root."""
         config = _make_config(tmp_path, promotion_threshold=5)
         learner = CorrectionLearner(config)
 
@@ -209,18 +218,17 @@ class TestLoadYamlNonDictRoot:
 
         # Corrupt the file to a list root
         learned_path = tmp_path / "learned.yaml"
-        learned_path.write_text("- item1\n- item2\n")
+        original_content = "- item1\n- item2\n"
+        learned_path.write_text(original_content)
 
         # Next correction triggers _save() -> _load_yaml() on the corrupted file
-        # This should NOT crash — _load_yaml() returns {} for non-dict root
+        # and must skip the write rather than destroy the unreadable content.
         learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
 
-        data = yaml.safe_load(learned_path.read_text())
-        assert isinstance(data, dict)
-        assert len(data["pending"]) >= 1
+        assert learned_path.read_text() == original_content
 
     def test_promote_with_non_dict_yaml_root(self, tmp_path: Path) -> None:
-        """If learned.yaml becomes a list mid-use, promotion still works."""
+        """Promotion fails safely and remains pending for a non-dict YAML root."""
         config = _make_config(tmp_path, promotion_threshold=2)
         learner = CorrectionLearner(config)
 
@@ -228,15 +236,35 @@ class TestLoadYamlNonDictRoot:
 
         # Corrupt the file
         learned_path = tmp_path / "learned.yaml"
-        learned_path.write_text("- item1\n- item2\n")
+        original_content = "- item1\n- item2\n"
+        learned_path.write_text(original_content)
+
+        assert learner._promote("sharp ratio", "Sharpe ratio") is False
 
         # Second correction triggers promotion -> _load_yaml() on corrupted file
         result = learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
-        assert result == "Sharpe ratio"
+        assert result is None
 
-        data = yaml.safe_load(learned_path.read_text())
-        assert isinstance(data, dict)
-        assert "Sharpe ratio" in data["terms"]
+        assert learned_path.read_text() == original_content
+        assert ("sharp ratio", "Sharpe ratio") in learner._pending
+
+
+class TestSaveFailures:
+    def test_save_yaml_returns_false_instead_of_raising(self, tmp_path: Path) -> None:
+        learner = CorrectionLearner(_make_config(tmp_path))
+
+        with patch("builtins.open", side_effect=OSError("disk full")):
+            assert learner._save_yaml({"terms": {}}) is False
+
+    def test_failed_promotion_write_returns_none_and_keeps_pending(self, tmp_path: Path) -> None:
+        learner = CorrectionLearner(_make_config(tmp_path, promotion_threshold=2))
+        learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
+
+        with patch.object(learner, "_save_yaml", return_value=False):
+            result = learner.log_correction("the sharp ratio is ok", "Sharpe ratio")
+
+        assert result is None
+        assert ("sharp ratio", "Sharpe ratio") in learner._pending
 
 
 class TestAttributeErrorInPending:

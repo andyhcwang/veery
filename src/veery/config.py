@@ -50,6 +50,9 @@ class STTConfig:
     whisper_prompt_terms_limit: int = 64
     whisper_prompt_char_limit: int = 400
     whisper_initial_prompt: str | None = None
+    # Watchdog: max seconds a dictation may spend in PROCESSING before the
+    # app force-resets to IDLE (recovers from backend hangs).
+    processing_timeout_sec: float = 120.0
 
 
 STT_BACKENDS: tuple[tuple[str, str], ...] = (
@@ -89,7 +92,7 @@ class HotkeyConfig:
 @dataclass(frozen=True)
 class OutputConfig:
     cgevent_char_limit: int = 500  # Use CGEvent typing below this, clipboard above
-    paste_delay_ms: int = 50  # Delay between clipboard write and Cmd+V
+    paste_delay_ms: int = 50  # Post-Cmd+V wait before clipboard restore (values <150 clamped to 150; see output.py)
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,37 @@ def _filter_keys(cls: type, raw: dict) -> dict:
     if unknown:
         logger.warning("Ignoring unknown config keys for %s: %s", cls.__name__, ", ".join(sorted(unknown)))
     return {k: v for k, v in raw.items() if k in valid}
+
+
+def _validate_numeric(
+    value: object,
+    *,
+    name: str,
+    default: float,
+    low: float | None = None,
+    high: float | None = None,
+    low_inclusive: bool = True,
+    high_inclusive: bool = True,
+    integer: bool = False,
+) -> tuple[float, bool]:
+    """Validate a numeric config value against optional bounds.
+
+    Returns ``(value, changed)``: the original value when valid, otherwise the
+    ``default`` with ``changed=True`` (and a warning logged). ``bool`` is never
+    accepted as a number even though it subclasses ``int``.
+    """
+    if integer:
+        ok = isinstance(value, int) and not isinstance(value, bool)
+    else:
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if ok and low is not None:
+        ok = value >= low if low_inclusive else value > low  # type: ignore[operator]
+    if ok and high is not None:
+        ok = value <= high if high_inclusive else value < high  # type: ignore[operator]
+    if ok:
+        return value, False  # type: ignore[return-value]
+    logger.warning("%s invalid (got %r), resetting to %r", name, value, default)
+    return default, True
 
 
 def _normalize_audio_config(raw: dict) -> dict:
@@ -189,18 +223,113 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         elif gain > 100:
             logger.warning("input_gain %.1f is unusually high (max recommended: 20.0), audio may clip", gain)
 
-        if rebuild_audio:
-            cfg = AppConfig(
-                audio=AudioConfig(**audio_kwargs),
-                vad=cfg.vad,
-                stt=cfg.stt,
-                jargon=cfg.jargon,
-                hotkey=cfg.hotkey,
-                output=cfg.output,
-                learning=cfg.learning,
-            )
+        audio_cfg = AudioConfig(**audio_kwargs) if rebuild_audio else cfg.audio
 
-        return cfg
+        # Validate VAD config.
+        vad_kwargs = dict(vars(cfg.vad))
+        rebuild_vad = False
+        threshold, changed = _validate_numeric(
+            cfg.vad.threshold, name="vad.threshold", default=0.4,
+            low=0.0, high=1.0, low_inclusive=False, high_inclusive=False,
+        )
+        if changed:
+            vad_kwargs["threshold"] = threshold
+            rebuild_vad = True
+        silence, changed = _validate_numeric(
+            cfg.vad.silence_duration_sec, name="vad.silence_duration_sec", default=2.0,
+            low=0.0, low_inclusive=False,
+        )
+        if changed:
+            vad_kwargs["silence_duration_sec"] = silence
+            rebuild_vad = True
+        min_speech, changed = _validate_numeric(
+            cfg.vad.min_speech_duration_sec, name="vad.min_speech_duration_sec", default=0.3,
+            low=0.0, low_inclusive=True,
+        )
+        if changed:
+            vad_kwargs["min_speech_duration_sec"] = min_speech
+            rebuild_vad = True
+        vad_cfg = VADConfig(**vad_kwargs) if rebuild_vad else cfg.vad
+
+        # Validate STT config.
+        stt_kwargs = dict(vars(cfg.stt))
+        rebuild_stt = False
+        if cfg.stt.backend not in ("sensevoice", "whisper"):
+            logger.warning(
+                "stt.backend must be 'sensevoice' or 'whisper' (got %r), resetting to 'whisper'",
+                cfg.stt.backend,
+            )
+            stt_kwargs["backend"] = "whisper"
+            rebuild_stt = True
+        timeout, changed = _validate_numeric(
+            cfg.stt.processing_timeout_sec, name="stt.processing_timeout_sec", default=120.0,
+            low=0.0, low_inclusive=False,
+        )
+        if changed:
+            stt_kwargs["processing_timeout_sec"] = timeout
+            rebuild_stt = True
+        stt_cfg = STTConfig(**stt_kwargs) if rebuild_stt else cfg.stt
+
+        # Validate jargon config.
+        jargon_kwargs = dict(vars(cfg.jargon))
+        rebuild_jargon = False
+        fuzzy, changed = _validate_numeric(
+            cfg.jargon.fuzzy_threshold, name="jargon.fuzzy_threshold", default=82,
+            low=0, high=100, integer=True,
+        )
+        if changed:
+            jargon_kwargs["fuzzy_threshold"] = int(fuzzy)
+            rebuild_jargon = True
+        jargon_cfg = JargonConfig(**jargon_kwargs) if rebuild_jargon else cfg.jargon
+
+        # Validate hotkey config.
+        hotkey_kwargs = dict(vars(cfg.hotkey))
+        rebuild_hotkey = False
+        valid_combos = (
+            "right_cmd", "left_cmd", "right_alt", "left_alt",
+            "right_shift", "left_shift", "right_ctrl", "left_ctrl",
+        )
+        if cfg.hotkey.key_combo not in valid_combos:
+            logger.warning(
+                "hotkey.key_combo must be one of %s (got %r), resetting to 'right_cmd'",
+                "/".join(valid_combos), cfg.hotkey.key_combo,
+            )
+            hotkey_kwargs["key_combo"] = "right_cmd"
+            rebuild_hotkey = True
+        if cfg.hotkey.mode not in ("hold", "toggle"):
+            logger.warning(
+                "hotkey.mode must be 'hold' or 'toggle' (got %r), resetting to 'hold'",
+                cfg.hotkey.mode,
+            )
+            hotkey_kwargs["mode"] = "hold"
+            rebuild_hotkey = True
+        hotkey_cfg = HotkeyConfig(**hotkey_kwargs) if rebuild_hotkey else cfg.hotkey
+
+        # Cross-check: learned terms are written by the learner but read by jargon.
+        if cfg.learning.enabled and cfg.jargon.learned_path is not None:
+            write_path = Path(cfg.learning.learned_path)
+            if not write_path.is_absolute():
+                write_path = PROJECT_ROOT / write_path
+            read_path = Path(cfg.jargon.learned_path)
+            if not read_path.is_absolute():
+                read_path = PROJECT_ROOT / read_path
+            if write_path.resolve() != read_path.resolve():
+                logger.warning(
+                    "learning.learned_path (%s) differs from jargon.learned_path (%s); "
+                    "learned terms will be written to one path but read from another",
+                    write_path,
+                    read_path,
+                )
+
+        return AppConfig(
+            audio=audio_cfg,
+            vad=vad_cfg,
+            stt=stt_cfg,
+            jargon=jargon_cfg,
+            hotkey=hotkey_cfg,
+            output=cfg.output,
+            learning=cfg.learning,
+        )
     except Exception:
         logger.warning("Failed to parse %s, using defaults", config_path, exc_info=True)
         return AppConfig()

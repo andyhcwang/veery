@@ -197,13 +197,24 @@ class AudioRecorder:
         self._rechunk_buf[:] = 0.0
         self._rechunk_pos = 0
 
-        self._stream = sd.InputStream(
+        stream = sd.InputStream(
             samplerate=self._audio_cfg.sample_rate,
             channels=self._audio_cfg.channels,
             dtype="float32",
             callback=self._audio_callback,
         )
-        self._stream.start()
+        try:
+            stream.start()
+        except Exception:
+            # A stream that was created but failed to start must not be kept,
+            # or the early-return above would treat it as "already open" and
+            # recording would silently never work again.
+            try:
+                stream.close()
+            except Exception:
+                logger.debug("Could not close unstarted stream", exc_info=True)
+            raise
+        self._stream = stream
         logger.info("Audio stream opened and capturing.")
 
     def start_recording(self, *, manual_mode: bool = False, open_stream_if_needed: bool = True) -> None:
@@ -284,6 +295,12 @@ class AudioRecorder:
 
         This is used as a second-stage gate before STT to avoid sending
         near-silent/manual-stop clips that can trigger Whisper hallucinations.
+
+        Deliberately lenient: audio reaching this gate already passed either
+        the recording-time VAD or the raw-fallback energy heuristic, so this
+        pass only needs to reject true silence/noise. A stricter re-gate here
+        would silently drop quiet or accented speech (VAD probabilities
+        differ slightly between passes).
         """
         if audio.size < self._audio_cfg.chunk_samples:
             return False
@@ -293,6 +310,10 @@ class AudioRecorder:
             model.reset_states()
         except Exception:
             pass
+
+        # Slightly below the recording threshold: borderline speech that
+        # triggered recording must not be rejected by a coin-flip re-run.
+        threshold = max(0.2, self._vad_cfg.threshold - 0.1)
 
         speech_frames = 0
         max_consecutive = 0
@@ -308,7 +329,7 @@ class AudioRecorder:
                 prob = 0.0
 
             total_frames += 1
-            if prob >= self._vad_cfg.threshold:
+            if prob >= threshold:
                 speech_frames += 1
                 consecutive += 1
                 if consecutive > max_consecutive:
@@ -324,10 +345,11 @@ class AudioRecorder:
         if total_frames == 0:
             return False
 
-        active_ratio = speech_frames / total_frames
         duration_sec = audio.size / self._audio_cfg.sample_rate
-        min_frames = 3 if duration_sec < 1.0 else 5
-        return speech_frames >= min_frames and (active_ratio >= 0.1 or max_consecutive >= 3)
+        # 2 consecutive frames = 64ms of sustained speech probability; the
+        # old active-ratio gate penalized long holds with short utterances.
+        min_frames = 2 if duration_sec < 1.0 else 3
+        return speech_frames >= min_frames and max_consecutive >= 2
 
     # ------------------------------------------------------------------
     # sounddevice callback (runs on real-time audio thread)
@@ -352,9 +374,19 @@ class AudioRecorder:
 
         mono = indata[:, 0].copy()
 
-        # Apply input gain if configured (for quiet microphones)
+        # Apply input gain if configured (for quiet microphones). The
+        # configured gain is a maximum: the effective gain is capped per chunk
+        # so a loud microphone is never driven into clipping distortion, while
+        # quiet mics still get the full boost.
         if self._audio_cfg.input_gain != 1.0:
-            np.multiply(mono, self._audio_cfg.input_gain, out=mono)
+            # Scalar reductions only — np.abs() would allocate a temp array,
+            # which the RT callback must not do.
+            peak = float(max(mono.max(), -mono.min()))
+            gain = self._audio_cfg.input_gain
+            if peak > 1e-6:
+                gain = min(gain, 0.98 / peak)
+            if gain > 1.0:
+                np.multiply(mono, gain, out=mono)
             np.clip(mono, -1.0, 1.0, out=mono)  # Clamp to valid audio range
 
         vad_size = self._audio_cfg.chunk_samples
@@ -446,12 +478,27 @@ class AudioRecorder:
     # ------------------------------------------------------------------
 
     def _close_stream(self) -> None:
-        """Stop and close the current stream if it is active."""
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-            logger.info("Recording stopped.")
+        """Stop and close the current stream if it is active.
+
+        Never raises: PortAudio can throw when the input device disappeared
+        mid-recording (Bluetooth/USB mic dropout), and callers must still be
+        able to flush the captured audio and reset state.
+        """
+        stream = self._stream
+        if stream is None:
+            return
+        self._stream = None
+        try:
+            try:
+                stream.stop()
+            finally:
+                # close() must run even when stop() raises, or the PortAudio
+                # stream object leaks after a device dropout.
+                stream.close()
+        except Exception:
+            logger.exception("Error closing audio stream (device disconnected?)")
+            return
+        logger.info("Recording stopped.")
 
     def _set_stop_reason(self, reason: StopReason) -> None:
         """Record the first stop reason for this session."""
@@ -486,12 +533,13 @@ class AudioRecorder:
                     active_frames = int(np.count_nonzero(frame_rms >= 0.015))
                     active_ratio = active_frames / n_frames
 
+                # Gate on the ABSOLUTE amount of speech-like audio, not a
+                # ratio over the whole hold: a 1s utterance in a 10s hold is
+                # real speech even though its whole-hold ratio/RMS are tiny.
                 min_manual_duration_sec = max(self._vad_cfg.min_speech_duration_sec, 0.25)
                 if (
                     raw_duration_sec >= min_manual_duration_sec
-                    and raw_rms >= 0.01
-                    and active_frames >= 3
-                    and active_ratio >= 0.2
+                    and active_frames >= 8  # >=0.16s of energetic audio
                 ):
                     source = self._raw_buffer
                     logger.info(

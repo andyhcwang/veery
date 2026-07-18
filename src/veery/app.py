@@ -21,17 +21,19 @@ from veery import __version__, sounds
 from veery.audio import AudioRecorder, AudioSegment, StopReason
 from veery.config import PROJECT_ROOT, STT_BACKENDS, AppConfig, load_config
 from veery.corrector import TextCorrector
-from veery.jargon import JargonCorrector
+from veery.jargon import JargonCorrector, JargonUsageTracker
 from veery.learner import CorrectionLearner
 from veery.output import paste_to_active_app
 from veery.overlay import (
     DownloadProgressOverlay,
     OverlayIndicator,
     PermissionGuideOverlay,
+    _check_accessibility,
     check_permissions_granted,
 )
 from veery.stt import (
     SenseVoiceSTT,
+    STTError,
     WhisperSTT,
     _is_model_cached,
     _is_sensevoice_cached,
@@ -101,13 +103,16 @@ class _ManualEditSession:
 def _is_repetitive_hallucination(text: str) -> bool:
     """Detect repetitive Whisper hallucination (e.g. 'Why Why Why...').
 
-    Returns True when a single word accounts for >80% of a 6+ word sequence.
+    Returns True when a single word accounts for >85% of an 8+ word sequence.
+    Real hallucination loops repeat dozens of times; the length gate lets
+    short deliberate repetition (<=7 words) through, while 8+ near-identical
+    words are treated as hallucination.
     """
     words = text.split()
-    if len(words) < 6:
+    if len(words) < 8:
         return False
     most_common_count = max(Counter(w.lower() for w in words).values())
-    return most_common_count / len(words) > 0.8
+    return most_common_count / len(words) > 0.85
 
 
 class State(enum.Enum):
@@ -210,13 +215,25 @@ class VeeryApp(rumps.App):
         # Signals that recording stream is actually open and capturing audio
         self._recording_started = threading.Event()
 
+        # Processing watchdog: generation counter + cancelled generation marker.
+        # If a processing worker hangs (e.g. STT stalls), the watchdog cancels
+        # that generation and returns the app to IDLE so dictation keeps working.
+        self._processing_generation = 0
+        self._cancelled_processing_generation = -1  # no generation cancelled yet
+        self._processing_lock = threading.Lock()
+
         # Signals that all models are loaded and app is ready
         self._ready = threading.Event()
 
-        # Progressive loading: tracks background Whisper download
+        # Progressive loading: tracks background Whisper download.
+        # _stt_swap_lock guards _whisper_download_cancelled, the
+        # _stt_switching claim/release, and the _stt reference swap (menu
+        # clicks on the main thread race the background loader).
+        # _whisper_loading is a best-effort flag touched only by the loader.
         self._whisper_loading: bool = False
         self._whisper_download_cancelled: bool = False
         self._stt_switching: bool = False
+        self._stt_swap_lock = threading.Lock()
 
         self._permission_overlay = PermissionGuideOverlay()
 
@@ -240,6 +257,22 @@ class VeeryApp(rumps.App):
             logger.info("TextCorrector initialized")
         except Exception:
             logger.exception("Failed to initialize TextCorrector")
+
+        # 2b. Jargon usage tracker (Wispr-style frequency/recency ranking for
+        # the Whisper prompt). Lives next to learned.yaml.
+        try:
+            from pathlib import Path
+
+            learned = self._config.jargon.learned_path or "jargon/learned.yaml"
+            learned_path = Path(learned)
+            if not learned_path.is_absolute():
+                learned_path = PROJECT_ROOT / learned_path
+            self._usage_tracker: JargonUsageTracker | None = JargonUsageTracker(
+                learned_path.parent / "usage_stats.yaml"
+            )
+        except Exception:
+            logger.exception("Failed to initialize JargonUsageTracker")
+            self._usage_tracker = None
 
         # 3. Correction learner
         if self._config.learning.enabled:
@@ -266,6 +299,18 @@ class VeeryApp(rumps.App):
     def _set_detail(self, text: str) -> None:
         """Update the detail menu item title on the main thread."""
         _run_on_main_thread(lambda t=text: setattr(self._detail_item, "title", t))
+
+    def _notify(self, title: str, subtitle: str, message: str) -> None:
+        """Send a user notification without ever raising.
+
+        rumps.notification raises RuntimeError when the app runs outside a
+        bundle (e.g. `uv run veery`), which would otherwise kill worker
+        threads or the pynput listener mid-flight.
+        """
+        try:
+            rumps.notification(title, subtitle, message)
+        except Exception:
+            logger.warning("Notification failed: %s / %s — %s", title, subtitle, message)
 
     def _on_permissions_granted(self) -> None:
         """Called when all permissions are granted (from PermissionGuideOverlay)."""
@@ -423,9 +468,13 @@ class VeeryApp(rumps.App):
             new_stt = create_stt(stt_cfg)
             self._apply_stt_runtime_hints(new_stt)
 
-            if not self._whisper_download_cancelled:
-                old_stt = self._stt
-                self._stt = new_stt
+            with self._stt_swap_lock:
+                cancelled = self._whisper_download_cancelled
+                if not cancelled:
+                    old_stt = self._stt
+                    self._stt = new_stt
+
+            if not cancelled:
                 self._queue_stt_cleanup(old_stt)
 
                 def _ui_switched():
@@ -452,6 +501,11 @@ class VeeryApp(rumps.App):
         terms = self._corrector.jargon.dictionary.canonical_terms
         if not terms:
             return None
+
+        # Rank by real usage (frequency, then recency) so the most relevant
+        # vocabulary makes it under the term/char caps.
+        if self._usage_tracker is not None:
+            terms = self._usage_tracker.rank(terms)
 
         term_limit = max(0, self._config.stt.whisper_prompt_terms_limit)
         char_limit = max(0, self._config.stt.whisper_prompt_char_limit)
@@ -533,15 +587,23 @@ class VeeryApp(rumps.App):
 
             logger.info("Registering push-to-talk key: %s (%s)", combo, self._hotkey_label)
 
+            # Any exception escaping a pynput callback kills the listener
+            # thread, permanently disabling the hotkey — never let one escape.
             def on_press(key):
-                self._on_global_key_press(key)
-                if key == target_key:
-                    self._on_key_down()
+                try:
+                    self._on_global_key_press(key)
+                    if key == target_key:
+                        self._on_key_down()
+                except Exception:
+                    logger.exception("Hotkey press handler failed")
 
             def on_release(key):
-                self._on_global_key_release(key)
-                if key == target_key:
-                    self._on_key_up()
+                try:
+                    self._on_global_key_release(key)
+                    if key == target_key:
+                        self._on_key_up()
+                except Exception:
+                    logger.exception("Hotkey release handler failed")
 
             self._hotkey_listener = Listener(on_press=on_press, on_release=on_release)
             self._hotkey_listener.daemon = True
@@ -554,28 +616,22 @@ class VeeryApp(rumps.App):
             if not self._hotkey_listener.is_alive():
                 logger.error("Hotkey listener died — Input Monitoring likely denied")
                 self._set_detail("Hotkey failed — grant Input Monitoring")
-                try:
-                    rumps.notification(
-                        "Veery",
-                        "Hotkey listener failed",
-                        "Grant Input Monitoring in System Settings "
-                        "\u2192 Privacy & Security \u2192 Input Monitoring, then restart.",
-                    )
-                except Exception:
-                    logger.warning("Could not send notification for hotkey failure")
-                return
-        except Exception:
-            logger.exception("Failed to start hotkey listener")
-            self._set_detail("Hotkey failed — check Input Monitoring")
-            try:
-                rumps.notification(
+                self._notify(
                     "Veery",
                     "Hotkey listener failed",
                     "Grant Input Monitoring in System Settings "
                     "\u2192 Privacy & Security \u2192 Input Monitoring, then restart.",
                 )
-            except Exception:
-                logger.warning("Could not send notification for hotkey failure")
+                return
+        except Exception:
+            logger.exception("Failed to start hotkey listener")
+            self._set_detail("Hotkey failed — check Input Monitoring")
+            self._notify(
+                "Veery",
+                "Hotkey listener failed",
+                "Grant Input Monitoring in System Settings "
+                "\u2192 Privacy & Security \u2192 Input Monitoring, then restart.",
+            )
 
     # ------------------------------------------------------------------
     # Global key monitoring (manual-edit auto-learn)
@@ -682,7 +738,11 @@ class VeeryApp(rumps.App):
         from rapidfuzz import fuzz
 
         similarity = fuzz.ratio(original.lower(), edited.lower())
-        if similarity < 40:
+        # Stricter than the re-dictation path (40): the edit buffer is
+        # reconstructed from keystrokes and cannot see mouse-driven cursor
+        # moves, so low-similarity "edits" are often garbage reconstructions
+        # that would teach the corrector wrong variant->canonical pairs.
+        if similarity < 55:
             logger.info("Skipping manual learn for large text rewrite (%.0f%% similar)", similarity)
             return
 
@@ -703,7 +763,7 @@ class VeeryApp(rumps.App):
         promoted = self._learner.log_correction(original, correction_phrase)
         if promoted is not None:
             self._reload_corrector_after_learning()
-            rumps.notification("Veery", "Learned!", f"Will now correct to: {promoted}")
+            self._notify("Veery", "Learned!", f"Will now correct to: {promoted}")
 
     def _extract_manual_correction_candidate(self, original: str, edited: str) -> str | None:
         """Extract a short corrected phrase from word-level diffs."""
@@ -1028,9 +1088,10 @@ class VeeryApp(rumps.App):
         """Finalize recording setup (state is already RECORDING, stream may already be open)."""
         if self._recorder is None:
             if self._is_active_recording_session(session_id):
-                rumps.notification("Veery", "Error", "Audio recorder not available")
+                self._notify("Veery", "Error", "Audio recorder not available")
                 self._recording_started.set()
-                self._set_state(State.IDLE)
+                self._overlay.show_warning("Recorder unavailable")
+                self._set_state(State.IDLE, skip_overlay=True)
             return
 
         try:
@@ -1045,8 +1106,9 @@ class VeeryApp(rumps.App):
                 return
             logger.exception("Failed to start recording")
             self._recording_started.set()  # Unblock key_up even on failure
-            rumps.notification("Veery", "Error", str(e))
-            self._set_state(State.IDLE)
+            self._notify("Veery", "Error", str(e))
+            self._overlay.show_warning("Recording failed")
+            self._set_state(State.IDLE, skip_overlay=True)
 
     def _watch_manual_stop(self, session_id: int | None = None) -> None:
         """Watch for recorder-driven manual stop reasons such as a max-duration cap."""
@@ -1079,12 +1141,17 @@ class VeeryApp(rumps.App):
         stop_message = None
         if reason == StopReason.MANUAL_CAP_REACHED:
             stop_message = "Max dictation length reached"
-            try:
-                rumps.notification("Veery", "Recording stopped", stop_message)
-            except Exception:
-                logger.warning("Could not send max-duration notification", exc_info=True)
+            self._notify("Veery", "Recording stopped", stop_message)
 
-        segment = self._recorder.stop_and_flush(reason=reason)
+        try:
+            segment = self._recorder.stop_and_flush(reason=reason)
+        except Exception:
+            # e.g. PortAudioError when the input device disappeared mid-recording.
+            # Without this the state machine would wedge in RECORDING forever.
+            logger.exception("Failed to stop recording cleanly")
+            self._overlay.show_warning("Recording failed")
+            self._set_state(State.IDLE, skip_overlay=True)
+            return
         if segment is None:
             self._overlay.show_warning(stop_message or "No speech detected")
             self._set_state(State.IDLE, skip_overlay=True)
@@ -1092,10 +1159,81 @@ class VeeryApp(rumps.App):
         # Transition to PROCESSING synchronously so a rapid re-press of the
         # hotkey sees the correct state before the worker thread starts.
         self._set_state(State.PROCESSING)
-        worker = threading.Thread(target=self._process_segment, args=(segment,), daemon=True)
+        with self._processing_lock:
+            self._processing_generation += 1
+            generation = self._processing_generation
+        worker = threading.Thread(
+            target=self._process_segment, args=(segment, generation), daemon=True
+        )
         worker.start()
+        threading.Thread(
+            target=self._watch_processing, args=(worker, generation), daemon=True
+        ).start()
 
-    def _process_segment(self, segment: AudioSegment) -> None:
+    def _watch_processing(self, worker: threading.Thread, generation: int) -> None:
+        """Watchdog: if processing hangs (STT stall), return the app to IDLE.
+
+        The hung worker thread cannot be killed, but cancelling its generation
+        makes it discard its result: the worker re-checks cancellation right
+        after transcribe and again just before the paste. (A stall inside
+        paste_to_active_app itself remains unguarded — nothing can be checked
+        after the irreversible side effect starts.)
+        """
+        worker.join(timeout=self._config.stt.processing_timeout_sec)
+        if not worker.is_alive():
+            return  # completed in time — never mark this generation cancelled
+
+        with self._processing_lock:
+            if generation != self._processing_generation:
+                return  # a newer session took over
+            self._cancelled_processing_generation = generation
+
+        logger.error(
+            "Processing watchdog fired after %.0fs — resetting to idle "
+            "(STT likely stalled; model download or backend hang)",
+            self._config.stt.processing_timeout_sec,
+        )
+        self._notify("Veery", "Transcription timed out", "Reset to idle — try again.")
+        if self._leave_processing_state(skip_overlay=True):
+            self._overlay.show_warning("Transcription timed out")
+
+    def _is_processing_cancelled(self, generation: int) -> bool:
+        with self._processing_lock:
+            return generation == self._cancelled_processing_generation
+
+    def _leave_processing_state(self, *, skip_overlay: bool) -> bool:
+        """Compare-and-set PROCESSING -> IDLE.
+
+        Guards the narrow races the generation staleness check can't: a
+        worker that passed its staleness check an instant before the watchdog
+        cancelled it, and the watchdog racing a normally-completing worker.
+        An unconditional _set_state(IDLE) in either case would stomp the
+        state a newer session owns. Returns True when the transition
+        actually happened.
+        """
+        with self._state_lock:
+            if self._state != State.PROCESSING:
+                logger.warning(
+                    "PROCESSING->IDLE transition skipped: state is %s (concurrent owner)",
+                    self._state.value,
+                )
+                return False
+            self._state = State.IDLE
+            self._recording_finalizing = False
+
+        logger.info("State: processing -> idle")
+
+        def _ui():
+            self.title = "\U0001f3a4"
+            self._detail_item.title = "Ready"
+            if not skip_overlay:
+                self._overlay.hide()
+
+        _run_on_main_thread(_ui)
+        self._cleanup_pending_stt_async()
+        return True
+
+    def _process_segment(self, segment: AudioSegment, generation: int = 0) -> None:
         """Process a captured audio segment: STT -> correct -> paste.
 
         Note: state is already PROCESSING (set by _stop_recording before
@@ -1103,21 +1241,32 @@ class VeeryApp(rumps.App):
         presses could re-enter recording.
         """
         success = False
+        warned = False
+
+        def _warn(message: str) -> None:
+            nonlocal warned
+            warned = True
+            self._overlay.show_warning(message)
+
         try:
+            vad_says_speech: bool | None = None
             if self._recorder is not None:
                 try:
-                    if not self._recorder.has_speech(segment.audio):
-                        logger.info(
-                            "Skipping STT: segment failed VAD speech check (duration=%.2fs).",
-                            segment.duration_sec,
-                        )
-                        self._overlay.show_warning("No speech detected")
-                        return
+                    vad_says_speech = self._recorder.has_speech(segment.audio)
                 except Exception:
                     logger.exception("Segment VAD speech check failed; continuing to STT")
+            if vad_says_speech is False:
+                logger.info(
+                    "Skipping STT: segment failed VAD speech check (duration=%.2fs).",
+                    segment.duration_sec,
+                )
+                _warn("No speech detected")
+                return
 
             # Guard against "press/release with no speech" short noise clips.
-            if segment.duration_sec < 1.0:
+            # Only applied when the VAD check could not run \u2014 when VAD already
+            # confirmed speech, a low RMS just means a quiet mic, not silence.
+            if vad_says_speech is None and segment.duration_sec < 1.0:
                 rms = float(np.sqrt(np.mean(segment.audio**2)))
                 if rms < 0.02:
                     logger.info(
@@ -1125,22 +1274,29 @@ class VeeryApp(rumps.App):
                         segment.duration_sec,
                         rms,
                     )
-                    self._overlay.show_warning("No speech detected")
+                    _warn("No speech detected")
                     return
 
             stt = self._stt
             if stt is None:
-                rumps.notification("Veery", "Error", "STT model not available")
+                self._notify("Veery", "Error", "STT model not available")
+                _warn("STT not ready")
                 return
 
             raw_text = stt.transcribe(segment.audio, segment.sample_rate)
+
+            if self._is_processing_cancelled(generation):
+                logger.warning("Discarding result of cancelled processing generation %d", generation)
+                warned = True  # watchdog already showed a warning; don't clobber it
+                return
+
             if not raw_text:
-                self._overlay.show_warning("No speech detected")
+                _warn("No speech detected")
                 return
 
             if _is_repetitive_hallucination(raw_text):
                 logger.warning("Hallucination detected, discarding: %.80s...", raw_text)
-                self._overlay.show_warning("Filtered repetitive audio")
+                _warn("Filtered repetitive audio")
                 return
 
             logger.info("Transcribed: %s", raw_text)
@@ -1153,27 +1309,107 @@ class VeeryApp(rumps.App):
             else:
                 final_text = raw_text
 
-            self._try_auto_learn(final_text)
+            if not final_text:
+                _warn("Nothing left after cleanup")
+                return
+
+            if not _check_accessibility():
+                logger.error("Accessibility permission missing — cannot type text")
+                self._notify(
+                    "Veery",
+                    "Cannot type text",
+                    "Grant Accessibility in System Settings → Privacy & Security.",
+                )
+                _warn("No Accessibility permission")
+                return
+
+            # Last cancellation check before the irreversible side effect: a
+            # watchdog that fired during correction must not paste stale text.
+            if self._is_processing_cancelled(generation):
+                logger.warning("Discarding cancelled generation %d before paste", generation)
+                warned = True
+                return
+
             paste_to_active_app(final_text, self._config.output)
+            # Learning runs AFTER the paste: a learning failure must never
+            # cost the user their dictated text.
+            try:
+                self._try_auto_learn(final_text)
+            except Exception:
+                logger.exception("Auto-learn failed")
+            try:
+                self._record_jargon_usage(final_text)
+            except Exception:
+                logger.exception("Jargon usage tracking failed")
             self._last_pasted_text = final_text
             self._last_pasted_time = time.monotonic()
             self._begin_manual_edit_monitor(final_text)
             self._session_count += 1
             success = True
 
+        except STTError as e:
+            # Backend failure is NOT "no speech" — say so, or the user blames
+            # their microphone and re-dictates into a broken backend.
+            logger.error("STT backend failed: %s", e)
+            self._notify("Veery", "Transcription failed", str(e))
+            _warn("Transcription failed — see log")
         except Exception as e:
             logger.exception("Processing failed")
-            rumps.notification("Veery", "Error", str(e))
+            self._notify("Veery", "Error", str(e))
+            _warn("Processing failed — see log")
         finally:
-            if success:
-                sounds.play_success()
-                self._overlay.show_success()
-            self._set_state(State.IDLE, skip_overlay=success)
-            if self._session_count > 0:
-                n = self._session_count
-                self._set_detail(
-                    f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session",
+            # Nothing before the state transition may raise, or the app would
+            # stay stuck in PROCESSING forever.
+            try:
+                if success:
+                    sounds.play_success()
+                    self._overlay.show_success()
+            except Exception:
+                logger.exception("Success feedback failed")
+            # A stale (watchdog-cancelled or superseded) worker must not touch
+            # the state machine \u2014 a newer session owns it now.
+            with self._processing_lock:
+                stale = (
+                    generation != self._processing_generation
+                    or generation == self._cancelled_processing_generation
                 )
+            if not stale:
+                self._leave_processing_state(skip_overlay=success or warned)
+                if self._session_count > 0:
+                    n = self._session_count
+                    self._set_detail(
+                        f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session",
+                    )
+
+    def _record_jargon_usage(self, final_text: str) -> None:
+        """Track which canonical jargon terms appeared in the final output.
+
+        ASCII terms are matched on word boundaries (so "API" doesn't count
+        inside "capitalize"); CJK and mixed terms use substring matching
+        since CJK has no word boundaries. Feeds the frequency/recency ranking
+        used by the Whisper prompt so the model is biased toward vocabulary
+        the user actually dictates.
+        """
+        if self._usage_tracker is None or self._corrector is None or not final_text:
+            return
+        import re
+
+        text_lower = final_text.lower()
+        used = []
+        for term in self._corrector.jargon.dictionary.canonical_terms:
+            term_lower = term.lower()
+            if re.fullmatch(r"[\w\s]+", term_lower, re.ASCII):
+                if re.search(rf"\b{re.escape(term_lower)}\b", text_lower):
+                    used.append(term)
+            elif term_lower in text_lower:
+                used.append(term)
+        if not used:
+            return
+        flushed = self._usage_tracker.record(used)
+        if flushed:
+            # Refresh the Whisper prompt ranking now and then (piggybacks on
+            # the tracker's batched flush cadence — every Nth dictation).
+            self._apply_stt_runtime_hints(self._stt)
 
     def _try_auto_learn(self, new_text: str) -> None:
         """If the new dictation is similar to the last one, auto-learn the correction."""
@@ -1201,13 +1437,14 @@ class VeeryApp(rumps.App):
         promoted = self._learner.log_correction(self._last_pasted_text, new_text)
         if promoted is not None:
             self._reload_corrector_after_learning()
-            rumps.notification("Veery", "Learned!", f"Will now correct to: {promoted}")
+            self._notify("Veery", "Learned!", f"Will now correct to: {promoted}")
 
     def _reload_corrector_after_learning(self) -> None:
         """Reload jargon dictionaries so newly promoted terms take effect immediately."""
         try:
             self._corrector = TextCorrector(JargonCorrector(self._config.jargon))
             self._apply_stt_runtime_hints(self._stt)
+            self._ensure_learned_menu_item()
             logger.info("Reloaded TextCorrector after learning update")
         except Exception:
             logger.exception("Failed to reload TextCorrector after learning update")
@@ -1239,18 +1476,20 @@ class VeeryApp(rumps.App):
         if self._whisper_loading:
             if backend_id == "whisper":
                 # Whisper is already downloading in background — let it auto-switch
-                self._whisper_download_cancelled = False
+                with self._stt_swap_lock:
+                    self._whisper_download_cancelled = False
                 self._detail_item.title = "Downloading Whisper..."
                 logger.info("Whisper already downloading, will auto-switch on completion")
                 return
             # Switching away from whisper while it's downloading
-            self._whisper_download_cancelled = True
+            with self._stt_swap_lock:
+                self._whisper_download_cancelled = True
 
-        if self._stt_switching:
-            logger.info("STT switch already in progress, ignoring click for %s", backend_id)
-            return
-
-        self._stt_switching = True
+        with self._stt_swap_lock:
+            if self._stt_switching:
+                logger.info("STT switch already in progress, ignoring click for %s", backend_id)
+                return
+            self._stt_switching = True
         self._detail_item.title = "Switching STT model..."
         logger.info("User selected STT backend: %s", backend_id)
 
@@ -1258,12 +1497,25 @@ class VeeryApp(rumps.App):
             try:
                 from dataclasses import replace
                 new_config = replace(self._config.stt, backend=backend_id)
+                # Pre-download with progress + stall detection; create_stt would
+                # otherwise trigger a silent blocking download with no feedback.
+                if backend_id == "whisper" and not _is_model_cached(new_config.whisper_model):
+                    ensure_model_downloaded(
+                        new_config.whisper_model,
+                        progress_callback=lambda _f, detail: self._set_detail(detail),
+                    )
+                elif backend_id == "sensevoice" and not _is_sensevoice_cached(new_config.model_name):
+                    ensure_sensevoice_downloaded(
+                        new_config.model_name,
+                        progress_callback=lambda _f, detail: self._set_detail(detail),
+                    )
                 new_stt = create_stt(new_config)
                 self._apply_stt_runtime_hints(new_stt)
-                old_stt = self._stt
-                self._stt = new_stt
+                with self._stt_swap_lock:
+                    old_stt = self._stt
+                    self._stt = new_stt
+                    self._stt_backend = backend_id
                 self._queue_stt_cleanup(old_stt)
-                self._stt_backend = backend_id
 
                 def _ui_ok():
                     self._update_stt_checkmarks(backend_id)
@@ -1275,7 +1527,8 @@ class VeeryApp(rumps.App):
                 logger.exception("Failed to switch STT backend to %s", backend_id)
                 self._set_detail("Ready (STT switch failed)")
             finally:
-                self._stt_switching = False
+                with self._stt_swap_lock:
+                    self._stt_switching = False
 
         threading.Thread(target=_switch, daemon=True).start()
 
@@ -1294,6 +1547,7 @@ class VeeryApp(rumps.App):
             self._edit_jargon_menu.add(item)
 
         # Include learned.yaml if configured and exists
+        self._learned_menu_added = False
         if self._config.jargon.learned_path is not None:
             learned = Path(self._config.jargon.learned_path)
             if not learned.is_absolute():
@@ -1303,13 +1557,42 @@ class VeeryApp(rumps.App):
                     learned.name,
                     callback=functools.partial(self._open_jargon_file, learned),
                 ))
+                self._learned_menu_added = True
+
+    def _ensure_learned_menu_item(self) -> None:
+        """Add learned.yaml to the jargon submenu once it exists.
+
+        The submenu is built at startup, before the first promotion has
+        created the file; without this it stays hidden until an app restart.
+        """
+        if self._learned_menu_added or self._config.jargon.learned_path is None:
+            return
+        from pathlib import Path
+
+        learned = Path(self._config.jargon.learned_path)
+        if not learned.is_absolute():
+            learned = PROJECT_ROOT / learned
+        if not learned.exists():
+            return
+        self._learned_menu_added = True
+
+        def _add():
+            try:
+                self._edit_jargon_menu.add(rumps.MenuItem(
+                    learned.name,
+                    callback=functools.partial(self._open_jargon_file, learned),
+                ))
+            except Exception:
+                logger.exception("Could not add learned.yaml menu item")
+
+        _run_on_main_thread(_add)
 
     def _open_jargon_file(self, path, _sender) -> None:
         """Open a jargon YAML file in the default editor."""
         if path.exists():
             subprocess.run(["open", str(path)], check=False)
         else:
-            rumps.notification("Veery", "", f"Jargon file not found: {path}")
+            self._notify("Veery", "", f"Jargon file not found: {path}")
 
     def _on_about(self, _sender) -> None:
         """Show About dialog."""
@@ -1338,6 +1621,11 @@ class VeeryApp(rumps.App):
         """Clean shutdown."""
         self._finalize_manual_edit_learning()
         self._discard_manual_edit_monitor()
+        if self._usage_tracker is not None:
+            try:
+                self._usage_tracker.flush()
+            except Exception:
+                logger.exception("Could not flush usage stats")
         current_stt = self._stt
         self._stt = None
         self._queue_stt_cleanup(current_stt)

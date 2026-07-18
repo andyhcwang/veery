@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -80,8 +83,12 @@ class JargonDictionary:
             logger.debug("Jargon file not found (optional): %s", path)
             return
 
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            logger.warning("Failed to read jargon file, skipping: %s", path, exc_info=True)
+            return
 
         if not isinstance(data, dict):
             logger.warning("Ignoring malformed jargon file (expected dict root): %s", path)
@@ -265,3 +272,88 @@ class JargonCorrector:
                 parts[pi] = ""
 
         return "".join(parts)
+
+
+class JargonUsageTracker:
+    """Tracks per-term usage frequency and recency.
+
+    Terms the user actually dictates get priority in the length-capped
+    Whisper initial-prompt (see STTConfig.whisper_prompt_*), so the
+    vocabulary the model is biased toward adapts to real usage over time.
+    Stats persist to the YAML file the caller supplies.
+    """
+
+    def __init__(self, stats_path: Path | str, *, flush_every: int = 5) -> None:
+        self._path = Path(stats_path)
+        self._lock = threading.Lock()
+        self._stats: dict[str, dict] = {}
+        self._pending_flush = 0
+        self._flush_every = max(1, flush_every)
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            if not self._path.exists():
+                return
+            with open(self._path) as f:
+                data = yaml.safe_load(f) or {}
+            terms = data.get("terms", {}) if isinstance(data, dict) else {}
+            if not isinstance(terms, dict):
+                return
+            for term, entry in terms.items():
+                if isinstance(entry, dict):
+                    self._stats[str(term)] = {
+                        "count": int(entry.get("count", 0)),
+                        "last_used": str(entry.get("last_used", "")),
+                    }
+        except Exception:
+            logger.warning("Usage stats unreadable (%s), starting fresh", self._path)
+
+    def record(self, terms: Iterable[str]) -> bool:
+        """Record one usage of each term. Returns True when stats were flushed."""
+        terms = [t for t in terms if t]
+        if not terms:
+            return False
+        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        with self._lock:
+            for term in terms:
+                entry = self._stats.setdefault(term, {"count": 0, "last_used": ""})
+                entry["count"] += 1
+                entry["last_used"] = today
+            self._pending_flush += 1
+            if self._pending_flush >= self._flush_every:
+                self._flush_locked()
+                return True
+        return False
+
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._path, "w") as f:
+                yaml.dump(
+                    {"terms": self._stats},
+                    f,
+                    default_flow_style=False,
+                    allow_unicode=True,
+                    sort_keys=True,
+                )
+            self._pending_flush = 0
+        except Exception:
+            logger.warning("Could not save usage stats to %s", self._path, exc_info=True)
+
+    def rank(self, terms: Iterable[str]) -> list[str]:
+        """Order terms by usage count desc, then recency desc, then load order.
+
+        Python's stable sort keeps the original (curated) order for terms
+        that have never been used.
+        """
+        ranked = list(terms)
+        with self._lock:
+            stats = {t: dict(e) for t, e in self._stats.items()}
+        ranked.sort(key=lambda t: stats.get(t, {}).get("last_used", ""), reverse=True)
+        ranked.sort(key=lambda t: stats.get(t, {}).get("count", 0), reverse=True)
+        return ranked

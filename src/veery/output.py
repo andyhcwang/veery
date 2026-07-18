@@ -29,10 +29,17 @@ def _type_via_cgevent(text: str) -> None:
         utf16_len = len(batch.encode("utf-16-le")) // 2
 
         event_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
+        # Zero the synthesized event's modifier flags. Otherwise, if the user's
+        # physical Cmd is still held (toggle mode stops recording on the
+        # Right-Cmd *press*, so typing can start while the key is still down),
+        # the OS combines the hardware modifier state with our keystrokes,
+        # turning typed text into Cmd shortcuts.
+        Quartz.CGEventSetFlags(event_down, 0)
         Quartz.CGEventKeyboardSetUnicodeString(event_down, utf16_len, batch)
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_down)
 
         event_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
+        Quartz.CGEventSetFlags(event_up, 0)
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_up)
 
 
@@ -67,8 +74,11 @@ def _paste_via_clipboard(text: str, paste_delay_sec: float = 0.05) -> None:
         Quartz.CGEventSetFlags(cmd_v_up, Quartz.kCGEventFlagMaskCommand)
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, cmd_v_up)
 
-        # Wait for paste to complete
-        time.sleep(paste_delay_sec)
+        # Wait for paste to complete. Enforce a minimum effective delay so the
+        # target app has time to service the paste before we restore the old
+        # clipboard below; too short a delay lets the restore win the race and
+        # the stale/old clipboard gets pasted (worse for long text).
+        time.sleep(max(paste_delay_sec, 0.15))
     finally:
         # Restore original clipboard
         pb.clearContents()
