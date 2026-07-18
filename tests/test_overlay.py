@@ -288,3 +288,133 @@ class TestOverlayConstants:
         assert _BG_GREEN == 0.08
         assert _BG_BLUE == 0.08
         assert _BG_ALPHA == 0.78
+
+
+class TestFreshPermissionCheck:
+    """_fresh_permission_check re-evaluates TCC in a child process."""
+
+    def test_unknown_kind_returns_false(self):
+        from veery.overlay import _fresh_permission_check
+
+        assert _fresh_permission_check("nonsense") is False
+
+    def test_granted_child_exit_zero(self):
+        from veery.overlay import _fresh_permission_check
+
+        proc = MagicMock(returncode=0)
+        with patch("veery.overlay.subprocess.run", return_value=proc) as run:
+            assert _fresh_permission_check("accessibility") is True
+        assert run.called
+
+    def test_denied_child_exit_nonzero(self):
+        from veery.overlay import _fresh_permission_check
+
+        proc = MagicMock(returncode=1)
+        with patch("veery.overlay.subprocess.run", return_value=proc):
+            assert _fresh_permission_check("input_monitoring") is False
+
+    def test_child_failure_returns_false(self):
+        from veery.overlay import _fresh_permission_check
+
+        with patch("veery.overlay.subprocess.run", side_effect=OSError("spawn failed")):
+            assert _fresh_permission_check("accessibility") is False
+
+
+class TestStaleGrantRelaunch:
+    """Granted-but-cached-denied permissions trigger the relaunch path."""
+
+    def _make_overlay(self):
+        from veery.overlay import PermissionGuideOverlay
+
+        overlay = PermissionGuideOverlay()
+        overlay._pending_steps = [0]
+        overlay._current_step = 0
+        return overlay
+
+    def test_stale_grant_detected_every_third_poll(self):
+        overlay = self._make_overlay()
+        with (
+            patch("veery.overlay._check_accessibility", return_value=False),
+            patch("veery.overlay._fresh_permission_check", return_value=True) as fresh,
+            patch.object(overlay, "_handle_stale_grant") as handle,
+        ):
+            overlay._poll_permission()
+            overlay._poll_permission()
+            assert not fresh.called  # polls 1-2: no child spawned
+            overlay._poll_permission()  # poll 3: fresh check runs
+        assert fresh.call_count == 1
+        assert handle.call_count == 1
+
+    def test_fresh_check_denied_keeps_polling(self):
+        overlay = self._make_overlay()
+        with (
+            patch("veery.overlay._check_accessibility", return_value=False),
+            patch("veery.overlay._fresh_permission_check", return_value=False),
+            patch.object(overlay, "_handle_stale_grant") as handle,
+        ):
+            for _ in range(6):
+                overlay._poll_permission()
+        assert not handle.called
+
+    def test_microphone_step_never_spawns_child(self):
+        overlay = self._make_overlay()
+        overlay._pending_steps = [1]
+        with (
+            patch("veery.overlay._check_microphone", return_value=False),
+            patch("veery.overlay._fresh_permission_check") as fresh,
+        ):
+            for _ in range(6):
+                overlay._poll_permission()
+        assert not fresh.called
+
+    def test_normal_grant_advances_without_child(self):
+        overlay = self._make_overlay()
+        overlay._on_complete = MagicMock()
+        with (
+            patch("veery.overlay._check_accessibility", return_value=True),
+            patch("veery.overlay._fresh_permission_check") as fresh,
+            patch.object(overlay, "_stop_timer"),
+            patch.object(overlay, "_fade_out"),
+        ):
+            overlay._poll_permission()
+        assert not fresh.called
+        overlay._on_complete.assert_called_once()
+
+    def test_handle_stale_grant_dev_mode_instructs_restart(self):
+        import sys
+
+        overlay = self._make_overlay()
+        overlay._body_label = MagicMock()
+        fake_appkit = MagicMock()
+        fake_appkit.NSBundle.mainBundle.return_value.bundlePath.return_value = (
+            "/Users/x/checkout"  # not a .app bundle -> dev mode
+        )
+        with (
+            patch.dict(sys.modules, {"AppKit": fake_appkit}),
+            patch.object(overlay, "_stop_timer") as stop,
+            patch("veery.overlay.subprocess.Popen") as popen,
+        ):
+            overlay._handle_stale_grant()
+        stop.assert_called_once()
+        assert not popen.called  # no relaunch in dev mode
+        msg = overlay._body_label.setStringValue_.call_args[0][0]
+        assert "restart" in msg.lower()
+
+    def test_handle_stale_grant_bundle_relaunches(self):
+        import sys
+
+        overlay = self._make_overlay()
+        overlay._body_label = MagicMock()
+        fake_appkit = MagicMock()
+        fake_appkit.NSBundle.mainBundle.return_value.bundlePath.return_value = (
+            "/Applications/Veery.app"
+        )
+        with (
+            patch.dict(sys.modules, {"AppKit": fake_appkit}),
+            patch.object(overlay, "_stop_timer"),
+            patch("veery.overlay.subprocess.Popen") as popen,
+        ):
+            overlay._handle_stale_grant()
+        assert popen.called
+        assert "/Applications/Veery.app" in popen.call_args[0][0][-1]
+        fake_appkit.NSApplication.sharedApplication.return_value.terminate_.assert_called_once()

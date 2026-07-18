@@ -984,6 +984,52 @@ def _check_input_monitoring() -> bool:
         return True
 
 
+_FRESH_CHECK_CODE = {
+    "accessibility": (
+        "import ctypes, ctypes.util, sys\n"
+        "path = ctypes.util.find_library('ApplicationServices')\n"
+        "lib = ctypes.cdll.LoadLibrary(path)\n"
+        "sys.exit(0 if lib.AXIsProcessTrusted() else 1)\n"
+    ),
+    "input_monitoring": (
+        "import sys\n"
+        "import Quartz\n"
+        "tap = Quartz.CGEventTapCreate(\n"
+        "    Quartz.kCGSessionEventTap, Quartz.kCGHeadInsertEventTap,\n"
+        "    Quartz.kCGEventTapOptionListenOnly,\n"
+        "    Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),\n"
+        "    lambda _p, _t, e, _r: e, None)\n"
+        "sys.exit(0 if tap is not None else 1)\n"
+    ),
+}
+
+
+def _fresh_permission_check(kind: str, timeout: float = 3.0) -> bool:
+    """Re-evaluate a TCC permission in a short-lived child process.
+
+    macOS caches TCC verdicts per process, so a grant made while the app is
+    running may never become visible to this process. A child process is
+    attributed to the same responsible app bundle but gets a fresh tccd
+    evaluation. Returns False when the check can't run (never blocks the
+    caller's fallback behavior).
+    """
+    code = _FRESH_CHECK_CODE.get(kind)
+    if code is None:
+        return False
+    import sys
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            timeout=timeout,
+        )
+        return proc.returncode == 0
+    except Exception:
+        logger.debug("Fresh %s permission check failed to run", kind, exc_info=True)
+        return False
+
+
 def check_permissions_granted() -> bool:
     """Return True if Accessibility, Microphone, and Input Monitoring are granted."""
     return _check_accessibility() and _check_microphone() and _check_input_monitoring()
@@ -1046,6 +1092,7 @@ class PermissionGuideOverlay:
         self._poll_timer = None
         self._on_complete: Callable[[], None] | None = None
         self._current_step = 0
+        self._poll_count = 0
         # Which steps actually need to be shown (indices into _PERM_STEPS)
         self._pending_steps: list[int] = []
 
@@ -1196,6 +1243,7 @@ class PermissionGuideOverlay:
     def _poll_permission(self) -> None:
         """Called every 2s to check if the current permission has been granted."""
         if self._check_current_permission():
+            self._poll_count = 0
             self._current_step += 1
             if self._current_step >= len(self._pending_steps):
                 # All permissions granted
@@ -1212,6 +1260,45 @@ class PermissionGuideOverlay:
                 self._open_settings(step["settings_url"])
                 if step_index == 1:
                     _request_microphone()
+            return
+
+        # macOS caches TCC verdicts per process: a grant made while the app
+        # is running can stay invisible to AXIsProcessTrusted /
+        # CGEventTapCreate in THIS process until relaunch. Every 3rd poll,
+        # re-evaluate in a child process (fresh tccd verdict, attributed to
+        # the same responsible app bundle); if the grant actually landed,
+        # relaunch so the app picks it up instead of appearing stuck.
+        self._poll_count = getattr(self, "_poll_count", 0) + 1
+        if self._poll_count % 3 != 0 or not self._pending_steps:
+            return
+        step_index = self._pending_steps[self._current_step]
+        kind = {0: "accessibility", 2: "input_monitoring"}.get(step_index)
+        if kind is None:
+            return
+        if _fresh_permission_check(kind):
+            logger.info(
+                "%s granted but invisible to this process (stale TCC cache) — relaunching",
+                kind,
+            )
+            self._handle_stale_grant()
+
+    def _handle_stale_grant(self) -> None:
+        """The permission was granted but this process can't see it yet."""
+        self._stop_timer()
+        import AppKit
+
+        bundle_path = str(AppKit.NSBundle.mainBundle().bundlePath() or "")
+        if bundle_path.endswith(".app"):
+            if self._body_label is not None:
+                self._body_label.setStringValue_("Permission granted — restarting Veery...")
+            subprocess.Popen(["/bin/sh", "-c", f'sleep 1; open "{bundle_path}"'])
+            AppKit.NSApplication.sharedApplication().terminate_(None)
+        else:
+            # Dev mode (`uv run veery`): we can't relaunch ourselves.
+            if self._body_label is not None:
+                self._body_label.setStringValue_(
+                    "Permission granted — quit and restart Veery to continue."
+                )
 
     def _fade_in(self) -> None:
         """Fade the panel in. Must be called from main thread."""
