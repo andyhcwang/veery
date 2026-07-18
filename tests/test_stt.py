@@ -450,8 +450,8 @@ class TestSTTConfigDefaults:
         assert cfg.language == "auto"
         assert cfg.device == "cpu"
         assert cfg.whisper_use_jargon_prompt is True
-        assert cfg.whisper_prompt_terms_limit == 64
-        assert cfg.whisper_prompt_char_limit == 400
+        assert cfg.whisper_prompt_terms_limit == 32
+        assert cfg.whisper_prompt_char_limit == 250
         assert cfg.whisper_initial_prompt is None
         assert cfg.processing_timeout_sec == 120.0
 

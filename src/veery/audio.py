@@ -30,6 +30,9 @@ class AudioSegment:
     audio: np.ndarray  # float32, mono, shape (n_samples,)
     sample_rate: int
     duration_sec: float
+    # True when the recording-time VAD confirmed speech in this segment —
+    # lets the pipeline skip a costly second full-segment VAD pass.
+    vad_confirmed: bool = False
 
 
 class _State(enum.Enum):
@@ -245,12 +248,32 @@ class AudioRecorder:
         """Stop recording and return all captured audio, using raw buffer as fallback.
 
         Use this for manual stops where the user explicitly ended recording.
+        The stream is detached synchronously but stopped/closed on a background
+        thread: PortAudio's stop() can block for 100-300ms and none of that
+        work is needed before transcription can start.
         """
-        self._close_stream()
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            threading.Thread(
+                target=self._close_detached_stream, args=(stream,), daemon=True
+            ).start()
         self._set_stop_reason(reason)
         self._done_event.set()
         self._manual_stop_event.set()
         return self._build_segment(use_raw=True)
+
+    @staticmethod
+    def _close_detached_stream(stream: sd.InputStream) -> None:
+        try:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
+        except Exception:
+            logger.exception("Error closing audio stream (device disconnected?)")
+            return
+        logger.info("Recording stopped.")
 
     def wait_for_speech_end(self, timeout: float | None = None) -> AudioSegment | None:
         """Block until VAD detects end of speech, then return the segment.
@@ -597,4 +620,7 @@ class AudioRecorder:
                 audio=audio,
                 sample_rate=self._audio_cfg.sample_rate,
                 duration_sec=duration_sec,
+                # The VAD buffer only fills after the recording-time VAD
+                # confirmed speech; the raw fallback was only energy-gated.
+                vad_confirmed=source is self._buffer,
             )

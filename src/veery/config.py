@@ -47,8 +47,10 @@ class STTConfig:
     backend: str = "whisper"  # "sensevoice" or "whisper"
     whisper_model: str = "mlx-community/whisper-large-v3-turbo"
     whisper_use_jargon_prompt: bool = True
-    whisper_prompt_terms_limit: int = 64
-    whisper_prompt_char_limit: int = 400
+    # The prompt is prefill work on EVERY dictation (~100-300ms at 400 chars);
+    # usage-ranked terms mean a smaller budget still covers active vocabulary.
+    whisper_prompt_terms_limit: int = 32
+    whisper_prompt_char_limit: int = 250
     whisper_initial_prompt: str | None = None
     # Watchdog: max seconds a dictation may spend in PROCESSING before the
     # app force-resets to IDLE (recovers from backend hangs).
@@ -91,7 +93,9 @@ class HotkeyConfig:
 
 @dataclass(frozen=True)
 class OutputConfig:
-    cgevent_char_limit: int = 500  # Use CGEvent typing below this, clipboard above
+    # CGEvent typing below this length, instant clipboard paste above. Typing
+    # long text is visibly slow in apps that process keystrokes one by one.
+    cgevent_char_limit: int = 150
     paste_delay_ms: int = 50  # Post-Cmd+V wait before clipboard restore (values <150 clamped to 150; see output.py)
 
 

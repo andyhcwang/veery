@@ -221,6 +221,7 @@ class VeeryApp(rumps.App):
         self._processing_generation = 0
         self._cancelled_processing_generation = -1  # no generation cancelled yet
         self._processing_lock = threading.Lock()
+        self._accessibility_ok_until = 0.0  # monotonic deadline of cached OK check
 
         # Signals that all models are loaded and app is ready
         self._ready = threading.Event()
@@ -1248,13 +1249,20 @@ class VeeryApp(rumps.App):
             warned = True
             self._overlay.show_warning(message)
 
+        timings: dict[str, float] = {}
+        t_start = time.monotonic()
         try:
             vad_says_speech: bool | None = None
-            if self._recorder is not None:
+            if getattr(segment, "vad_confirmed", False):
+                # Recording-time VAD already confirmed speech — re-scanning the
+                # whole segment would add up to ~1s of latency for nothing.
+                vad_says_speech = True
+            elif self._recorder is not None:
                 try:
                     vad_says_speech = self._recorder.has_speech(segment.audio)
                 except Exception:
                     logger.exception("Segment VAD speech check failed; continuing to STT")
+            timings["vad"] = time.monotonic() - t_start
             if vad_says_speech is False:
                 logger.info(
                     "Skipping STT: segment failed VAD speech check (duration=%.2fs).",
@@ -1283,7 +1291,9 @@ class VeeryApp(rumps.App):
                 _warn("STT not ready")
                 return
 
+            t_stt = time.monotonic()
             raw_text = stt.transcribe(segment.audio, segment.sample_rate)
+            timings["stt"] = time.monotonic() - t_stt
 
             if self._is_processing_cancelled(generation):
                 logger.warning("Discarding result of cancelled processing generation %d", generation)
@@ -1313,15 +1323,20 @@ class VeeryApp(rumps.App):
                 _warn("Nothing left after cleanup")
                 return
 
-            if not _check_accessibility():
-                logger.error("Accessibility permission missing — cannot type text")
-                self._notify(
-                    "Veery",
-                    "Cannot type text",
-                    "Grant Accessibility in System Settings → Privacy & Security.",
-                )
-                _warn("No Accessibility permission")
-                return
+            # Cache positive accessibility checks briefly — the ctypes lookup
+            # costs a few ms per dictation and grants rarely disappear.
+            now = time.monotonic()
+            if now >= self._accessibility_ok_until:
+                if not _check_accessibility():
+                    logger.error("Accessibility permission missing — cannot type text")
+                    self._notify(
+                        "Veery",
+                        "Cannot type text",
+                        "Grant Accessibility in System Settings → Privacy & Security.",
+                    )
+                    _warn("No Accessibility permission")
+                    return
+                self._accessibility_ok_until = now + 120.0
 
             # Last cancellation check before the irreversible side effect: a
             # watchdog that fired during correction must not paste stale text.
@@ -1330,7 +1345,17 @@ class VeeryApp(rumps.App):
                 warned = True
                 return
 
+            t_paste = time.monotonic()
             paste_to_active_app(final_text, self._config.output)
+            timings["paste"] = time.monotonic() - t_paste
+            logger.info(
+                "Latency: vad=%dms stt=%dms paste=%dms total=%dms (audio=%.1fs)",
+                int(timings.get("vad", 0) * 1000),
+                int(timings.get("stt", 0) * 1000),
+                int(timings.get("paste", 0) * 1000),
+                int((time.monotonic() - t_start) * 1000),
+                segment.duration_sec,
+            )
             # Learning runs AFTER the paste: a learning failure must never
             # cost the user their dictated text.
             try:

@@ -32,4 +32,4 @@ audio:
 #   mode: "hold"                  # "hold" (push-to-talk) or "toggle" (press-to-toggle)
 
 # output:
-#   cgevent_char_limit: 500
+#   cgevent_char_limit: 150

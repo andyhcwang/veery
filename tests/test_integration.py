@@ -195,7 +195,7 @@ class TestConfigLoadsDefaults:
         assert len(config.jargon.dict_paths) == 5
 
         assert isinstance(config.output, OutputConfig)
-        assert config.output.cgevent_char_limit == 500
+        assert config.output.cgevent_char_limit == 150
 
     def test_audio_config_properties(self) -> None:
         """Verify computed properties on AudioConfig."""
@@ -367,7 +367,7 @@ class TestConfigPartialYAML:
         assert config.vad.threshold == 0.4  # entire section defaulted
         assert config.stt.model_name == "iic/SenseVoiceSmall"  # default
         assert config.jargon.fuzzy_threshold == 82  # default
-        assert config.output.cgevent_char_limit == 500  # default
+        assert config.output.cgevent_char_limit == 150  # default
 
     def test_config_nonexistent_file(self) -> None:
         """load_config with a nonexistent path returns pure defaults."""
