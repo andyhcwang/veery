@@ -84,7 +84,7 @@ class JargonDictionary:
             return
 
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
         except Exception:
             logger.warning("Failed to read jargon file, skipping: %s", path, exc_info=True)
@@ -295,7 +295,7 @@ class JargonUsageTracker:
         try:
             if not self._path.exists():
                 return
-            with open(self._path) as f:
+            with open(self._path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             terms = data.get("terms", {}) if isinstance(data, dict) else {}
             if not isinstance(terms, dict):
@@ -333,7 +333,7 @@ class JargonUsageTracker:
     def _flush_locked(self) -> None:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._path, "w") as f:
+            with open(self._path, "w", encoding="utf-8") as f:
                 yaml.dump(
                     {"terms": self._stats},
                     f,

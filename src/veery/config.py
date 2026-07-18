@@ -173,7 +173,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         return AppConfig()
 
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
 
         audio_raw = _filter_keys(AudioConfig, _normalize_audio_config(raw.get("audio", {})))

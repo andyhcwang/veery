@@ -90,6 +90,13 @@ OPTIONS = {
         "CFBundleName": "Veery",
         "CFBundleShortVersionString": __version__,
         "CFBundleVersion": __version__,
+        # LaunchServices apps get no shell environment: without LANG/PYTHONUTF8
+        # Python 3.13 falls back to ASCII text encoding and every CJK data file
+        # (jargon dictionaries, learned.yaml) fails to read.
+        "LSEnvironment": {
+            "PYTHONUTF8": "1",
+            "LANG": "en_US.UTF-8",
+        },
         "LSMinimumSystemVersion": "14.0",
         "LSUIElement": True,
         "NSHighResolutionCapable": True,

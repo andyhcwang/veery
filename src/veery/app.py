@@ -1637,10 +1637,28 @@ class VeeryApp(rumps.App):
         rumps.quit_application()
 
 
+def _ensure_tool_path() -> None:
+    """Make Homebrew tools (ffmpeg etc.) findable under a LaunchServices PATH.
+
+    Spotlight-launched apps inherit only /usr/bin:/bin:/usr/sbin:/sbin; any
+    dependency that shells out to a Homebrew-installed binary would fail.
+    """
+    import os
+    import shutil
+
+    if shutil.which("ffmpeg") is not None:
+        return
+    extra = [p for p in ("/opt/homebrew/bin", "/usr/local/bin") if os.path.isdir(p)]
+    if extra:
+        os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + os.pathsep.join(extra)
+
+
 def main() -> None:
     """Entry point for `uv run veery`."""
     import argparse
     from pathlib import Path
+
+    _ensure_tool_path()
 
     parser = argparse.ArgumentParser(description="Veery bilingual dictation")
     parser.add_argument("--mine", nargs="+", metavar="PATH",

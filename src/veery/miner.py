@@ -283,7 +283,7 @@ def write_claude_commands_yaml(
     # Load existing file if present (for merge)
     existing_terms: dict[str, list[str]] = {}
     if output_path.exists():
-        with open(output_path) as f:
+        with open(output_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         if not isinstance(data, dict):
             logger.warning("Malformed YAML root in %s (not a dict), treating as empty", output_path)
@@ -316,7 +316,7 @@ def write_claude_commands_yaml(
         sort_keys=False,
     )
     tmp_path = output_path.with_suffix(".yaml.tmp")
-    with open(tmp_path, "w") as f:
+    with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(header)
         f.write(yaml_body)
     tmp_path.replace(output_path)
@@ -562,7 +562,7 @@ def _load_existing_terms(config: JargonConfig) -> set[str]:
             dict_path = PROJECT_ROOT / dict_path
         if not dict_path.exists():
             continue
-        with open(dict_path) as f:
+        with open(dict_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         if not isinstance(data, dict):
             logger.warning("Skipping %s: YAML root is not a dict", dict_path)
@@ -627,7 +627,7 @@ def write_mined_yaml(
     # Load existing file if present (for merge)
     existing_terms: dict[str, list[str]] = {}
     if output_path.exists():
-        with open(output_path) as f:
+        with open(output_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         if not isinstance(data, dict):
             logger.warning("Malformed YAML root in %s (not a dict), treating as empty", output_path)
@@ -663,7 +663,7 @@ def write_mined_yaml(
         sort_keys=False,
     )
     tmp_path = output_path.with_suffix(".yaml.tmp")
-    with open(tmp_path, "w") as f:
+    with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(header)
         f.write(yaml_body)
     tmp_path.replace(output_path)

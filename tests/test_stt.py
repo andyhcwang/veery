@@ -47,8 +47,13 @@ class TestWhisperSTT:
             result = stt.transcribe(audio, 16000)
 
         assert result == "hello world"
-        mock_sf.write.assert_called_once()
         mock_mlx.transcribe.assert_called_once()
+        # The audio array is passed directly — no temp WAV, no ffmpeg decode
+        # (unavailable on a LaunchServices PATH).
+        passed_audio = mock_mlx.transcribe.call_args.args[0]
+        assert isinstance(passed_audio, np.ndarray)
+        assert passed_audio.dtype == np.float32
+        np.testing.assert_allclose(passed_audio, audio)
         call_kwargs = mock_mlx.transcribe.call_args.kwargs
         assert call_kwargs["condition_on_previous_text"] is False
         assert call_kwargs["no_speech_threshold"] == 0.6
@@ -83,59 +88,47 @@ class TestWhisperSTT:
         ):
             stt.transcribe(audio, 16000)
 
-    def test_transcribe_uses_fresh_temp_files_and_unlinks_them(self) -> None:
-        """Each call gets an isolated WAV path that is removed afterward."""
+    def test_transcribe_passes_array_without_temp_files(self) -> None:
+        """No temp WAV files are created — the array goes straight to mlx."""
+        import tempfile as tempfile_module
+
         from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
         audio = np.random.randn(16000).astype(np.float32)
 
-        import soundfile as sf
-
         mock_mlx = MagicMock()
         mock_mlx.transcribe.return_value = {"text": "hello"}
 
-        # Patch sys.modules so the lazy `import mlx_whisper` / `import soundfile`
-        # inside transcribe() resolves to our mocks/real modules.
-        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": sf}):
+        with (
+            patch.dict("sys.modules", {"mlx_whisper": mock_mlx}),
+            patch.object(tempfile_module, "NamedTemporaryFile") as ntf,
+        ):
             result1 = stt.transcribe(audio, 16000)
             result2 = stt.transcribe(audio, 16000)
 
         assert result1 == "hello"
         assert result2 == "hello"
-        calls = mock_mlx.transcribe.call_args_list
-        paths = [call.args[0] for call in calls]
-        assert paths[0] != paths[1]
-        assert stt._tmp_wav not in paths
-        assert all(not Path(path).exists() for path in paths)
+        assert not ntf.called
+        for call in mock_mlx.transcribe.call_args_list:
+            assert isinstance(call.args[0], np.ndarray)
 
-    def test_transcribe_temp_file_is_unlinked_after_error(self) -> None:
-        """The per-call WAV is removed even when transcription raises."""
-        from veery.stt import STTError, WhisperSTT
+    def test_transcribe_resamples_non_16k_audio(self) -> None:
+        """Arrays at other sample rates are resampled to 16 kHz for mlx."""
+        from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
-        audio = np.random.randn(16000).astype(np.float32)
+        audio = np.random.randn(44100).astype(np.float32)  # 1s at 44.1 kHz
 
-        created_paths: list[str] = []
         mock_mlx = MagicMock()
+        mock_mlx.transcribe.return_value = {"text": "ok"}
 
-        def capture_and_raise(path, **kwargs):
-            created_paths.append(path)
-            raise RuntimeError("fail")
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            assert stt.transcribe(audio, 44100) == "ok"
 
-        mock_mlx.transcribe.side_effect = capture_and_raise
-
-        import soundfile as sf
-
-        with (
-            patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": sf}),
-            pytest.raises(STTError, match="Whisper transcription failed"),
-        ):
-            stt.transcribe(audio, 16000)
-
-        assert len(created_paths) == 1
-        assert created_paths[0] != stt._tmp_wav
-        assert Path(created_paths[0]).exists() is False
+        passed_audio = mock_mlx.transcribe.call_args.args[0]
+        assert passed_audio.dtype == np.float32
+        assert passed_audio.size == 16000
 
     def test_transcribe_returns_early_when_model_not_cached(self) -> None:
         from veery.stt import STTError, WhisperSTT

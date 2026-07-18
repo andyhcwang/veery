@@ -40,7 +40,7 @@ class CorrectionLearner:
         if not self._learned_path.exists():
             return
         try:
-            with open(self._learned_path) as f:
+            with open(self._learned_path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
         except Exception:
             logger.warning("learned.yaml unreadable, starting with empty pending", exc_info=True)
@@ -208,7 +208,7 @@ class CorrectionLearner:
         """
         if self._learned_path.exists():
             try:
-                with open(self._learned_path) as f:
+                with open(self._learned_path, encoding="utf-8") as f:
                     data = yaml.safe_load(f) or {}
             except Exception:
                 logger.warning("learned.yaml unreadable", exc_info=True)
@@ -228,7 +228,7 @@ class CorrectionLearner:
         """
         try:
             self._learned_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._learned_path, "w") as f:
+            with open(self._learned_path, "w", encoding="utf-8") as f:
                 yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
             return True
         except Exception:

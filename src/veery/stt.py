@@ -546,20 +546,6 @@ class WhisperSTT:
         self._config = config or STTConfig()
         self._loaded = False
         self._runtime_prompt: str | None = None
-        # Pre-allocate a single temp WAV file reused across transcriptions
-        # to avoid create/delete overhead on every call (~5-15ms savings).
-        _f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        self._tmp_wav: str = _f.name
-        _f.close()
-        import atexit
-        atexit.register(self._cleanup)
-
-    def _cleanup(self) -> None:
-        """Remove the temporary WAV file."""
-        try:
-            Path(self._tmp_wav).unlink(missing_ok=True)
-        except Exception:
-            pass
 
     def set_runtime_hints(self, *, prompt: str | None = None) -> None:
         """Attach runtime prompt hints derived from active jargon."""
@@ -606,12 +592,15 @@ class WhisperSTT:
             return
         try:
             import mlx_whisper
-            import soundfile as sf
 
             logger.info("Loading Whisper model: %s", self._config.whisper_model)
-            # Create a short silent WAV to trigger model load
-            sf.write(self._tmp_wav, np.zeros(16000, dtype=np.float32), 16000)
-            mlx_whisper.transcribe(self._tmp_wav, path_or_hf_repo=self._config.whisper_model)
+            # Short silent clip triggers model load. Passing the array
+            # directly avoids mlx-whisper's ffmpeg decode path, which breaks
+            # under LaunchServices (Homebrew is not on the app's PATH).
+            mlx_whisper.transcribe(
+                np.zeros(16000, dtype=np.float32),
+                path_or_hf_repo=self._config.whisper_model,
+            )
             self._loaded = True
             logger.info("Whisper model loaded successfully")
         except Exception:
@@ -678,17 +667,20 @@ class WhisperSTT:
                 "refusing a silent in-transcribe download"
             )
 
-        tmp_path: str | None = None
         try:
             import mlx_whisper
-            import soundfile as sf
 
-            # Fresh temp WAV per call (mlx-whisper expects a file path).
-            # A shared path would race: a watchdog-abandoned transcription or a
-            # backend switch could overwrite the file mid-read.
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                tmp_path = f.name
-            sf.write(tmp_path, audio, sample_rate)
+            # Pass the array directly: no temp file (nothing to race), and no
+            # ffmpeg decode — which is unavailable on a LaunchServices PATH.
+            # mlx-whisper expects 16 kHz mono when given an array.
+            audio = np.ascontiguousarray(audio, dtype=np.float32)
+            if sample_rate != 16000:
+                n_target = int(audio.size * 16000 / sample_rate)
+                audio = np.interp(
+                    np.linspace(0.0, audio.size, n_target, endpoint=False),
+                    np.arange(audio.size),
+                    audio,
+                ).astype(np.float32)
 
             transcribe_kwargs = {
                 "path_or_hf_repo": self._config.whisper_model,
@@ -712,7 +704,7 @@ class WhisperSTT:
                 transcribe_kwargs["initial_prompt"] = initial_prompt
 
             result = mlx_whisper.transcribe(
-                tmp_path,
+                audio,
                 **transcribe_kwargs,
             )
             self._loaded = True
@@ -721,9 +713,6 @@ class WhisperSTT:
         except Exception as exc:
             logger.exception("Whisper transcription failed")
             raise STTError("Whisper transcription failed") from exc
-        finally:
-            if tmp_path is not None:
-                Path(tmp_path).unlink(missing_ok=True)
 
     def release_resources(self) -> None:
         """Clear MLX Whisper model references and flush caches."""
