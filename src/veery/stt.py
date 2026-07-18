@@ -81,16 +81,19 @@ def _is_model_cached(repo_id: str) -> bool:
         if not snapshots.is_dir() or not any(snapshots.iterdir()):
             return False
         # Verify blobs contain at least one large complete file (weights).
-        # Incomplete downloads have a .incomplete suffix.
+        # Any .incomplete blob means a download was interrupted mid-file —
+        # treat the whole cache as invalid, otherwise mlx-whisper would
+        # silently resume a multi-GB download inside transcribe().
         blobs = model_dir / "blobs"
         if not blobs.is_dir():
             return False
+        has_weights = False
         for blob in blobs.iterdir():
             if blob.suffix == ".incomplete":
-                continue
+                return False
             if blob.is_file() and blob.stat().st_size > 1_000_000:
-                return True
-        return False
+                has_weights = True
+        return has_weights
     except Exception:
         logger.debug("Could not check HF cache for %s", repo_id)
     return False
@@ -311,17 +314,14 @@ def _curl_download_hf_model(
     if progress_callback:
         progress_callback(0.9, f"Finalizing {model_name}...")
 
-    # Run snapshot_download with xet disabled to create metadata/symlinks
-    old_xet = os.environ.get("HF_HUB_DISABLE_XET")
-    os.environ["HF_HUB_DISABLE_XET"] = "1"
-    try:
-        from huggingface_hub import snapshot_download
-        snapshot_download(repo_id)
-    finally:
-        if old_xet is None:
-            os.environ.pop("HF_HUB_DISABLE_XET", None)
-        else:
-            os.environ["HF_HUB_DISABLE_XET"] = old_xet
+    # Finalize metadata/symlinks with the stall-guarded downloader (the
+    # weights blob is already in place, so this should only fetch small
+    # files — but it must not be able to hang the thread either).
+    _snapshot_download_with_stall_detection(
+        repo_id,
+        progress_callback,
+        env_override={"HF_HUB_DISABLE_XET": "1"},
+    )
 
 
 def ensure_model_downloaded(
@@ -447,7 +447,11 @@ class SenseVoiceSTT:
         self._load_model()
 
     def _load_model(self) -> None:
-        """Eagerly load the SenseVoice model at init time."""
+        """Eagerly load the SenseVoice model at init time.
+
+        Raises on failure: a silently-None model would make transcribe()
+        return "" forever with no user-visible signal.
+        """
         try:
             from funasr import AutoModel
 
@@ -464,6 +468,7 @@ class SenseVoiceSTT:
         except Exception:
             logger.exception("Failed to load SenseVoice model")
             self._model = None
+            raise
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
         """Transcribe a numpy audio array to text.
@@ -519,9 +524,14 @@ def _strip_tags(text: str) -> str:
 
 
 class WhisperSTT:
-    """Wrapper around mlx-whisper for multilingual-robust STT on Apple Silicon."""
-    _MIN_RMS_ENERGY = 0.006
-    _MIN_ACTIVE_FRAME_RMS = 0.012
+    """Wrapper around mlx-whisper for multilingual-robust STT on Apple Silicon.
+
+    The energy pre-check is a last-ditch silence gate only: the VAD already
+    vouched for the segment upstream, so thresholds sit far below any real
+    speech (even from quiet mics) and only catch true digital silence.
+    """
+    _MIN_RMS_ENERGY = 0.003
+    _MIN_ACTIVE_FRAME_RMS = 0.008
     _SHORT_CLIP_SEC = 1.0
 
     def __init__(self, config: STTConfig | None = None) -> None:
@@ -577,12 +587,21 @@ class WhisperSTT:
         """
         if self._loaded:
             return
+        if not _is_model_cached(self._config.whisper_model):
+            # mlx-whisper would silently start a multi-GB download inside
+            # transcribe() with no progress or stall detection. Callers must
+            # run ensure_model_downloaded() first.
+            logger.error(
+                "Whisper model %s is not cached; refusing lazy in-transcribe download",
+                self._config.whisper_model,
+            )
+            return
         try:
             import mlx_whisper
             import soundfile as sf
 
             logger.info("Loading Whisper model: %s", self._config.whisper_model)
-            # Create a short silent WAV to trigger model download/load
+            # Create a short silent WAV to trigger model load
             sf.write(self._tmp_wav, np.zeros(16000, dtype=np.float32), 16000)
             mlx_whisper.transcribe(self._tmp_wav, path_or_hf_repo=self._config.whisper_model)
             self._loaded = True
@@ -641,22 +660,40 @@ class WhisperSTT:
                 )
             return ""
 
+        if not _is_model_cached(self._config.whisper_model):
+            logger.error(
+                "Whisper model %s is not cached; skipping transcription to avoid "
+                "a silent in-transcribe download (run ensure_model_downloaded first)",
+                self._config.whisper_model,
+            )
+            return ""
+
+        tmp_path: str | None = None
         try:
             import mlx_whisper
             import soundfile as sf
 
-            # Reuse pre-allocated temp WAV path (mlx-whisper expects a file path)
-            sf.write(self._tmp_wav, audio, sample_rate)
+            # Fresh temp WAV per call (mlx-whisper expects a file path).
+            # A shared path would race: a watchdog-abandoned transcription or a
+            # backend switch could overwrite the file mid-read.
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                tmp_path = f.name
+            sf.write(tmp_path, audio, sample_rate)
 
             transcribe_kwargs = {
                 "path_or_hf_repo": self._config.whisper_model,
                 # Avoid prompt feedback loops on short/noisy clips.
                 "condition_on_previous_text": False,
-                # Be more aggressive about skipping no-speech/silence windows.
-                "no_speech_threshold": 0.35,
-                "logprob_threshold": None,
+                # Whisper defaults: no_speech_prob only skips a window when the
+                # decode also looks bad (avg_logprob below threshold). The
+                # previous 0.35/None combo dropped real accented/quiet speech.
+                "no_speech_threshold": 0.6,
+                "logprob_threshold": -1.0,
                 "hallucination_silence_threshold": 0.2,
-                "temperature": 0.0,
+                # Standard fallback ladder: higher temperatures only kick in
+                # when greedy decoding fails (compression ratio / logprob),
+                # recovering utterances that a single 0.0 pass would drop.
+                "temperature": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
             }
             if self._config.language != "auto":
                 transcribe_kwargs["language"] = self._config.language
@@ -665,7 +702,7 @@ class WhisperSTT:
                 transcribe_kwargs["initial_prompt"] = initial_prompt
 
             result = mlx_whisper.transcribe(
-                self._tmp_wav,
+                tmp_path,
                 **transcribe_kwargs,
             )
             text = result.get("text", "") if isinstance(result, dict) else str(result)
@@ -673,6 +710,9 @@ class WhisperSTT:
         except Exception:
             logger.exception("Whisper transcription failed")
             return ""
+        finally:
+            if tmp_path is not None:
+                Path(tmp_path).unlink(missing_ok=True)
 
     def release_resources(self) -> None:
         """Clear MLX Whisper model references and flush caches."""
@@ -699,10 +739,26 @@ class WhisperSTT:
 
 
 def create_stt(config: STTConfig | None = None) -> SenseVoiceSTT | WhisperSTT:
-    """Factory: return the right STT backend based on config.backend."""
+    """Factory: return the right STT backend based on config.backend.
+
+    Raises:
+        RuntimeError: If the requested backend failed to load. Callers must
+            surface this — a half-constructed backend would silently return
+            "" for every transcription.
+    """
     config = config or STTConfig()
+    if config.backend not in ("whisper", "sensevoice"):
+        logger.warning("Unknown stt.backend %r, using whisper", config.backend)
+        from dataclasses import replace
+
+        config = replace(config, backend="whisper")
     if config.backend == "whisper":
         stt = WhisperSTT(config)
         stt.load_model()
+        if not stt._loaded:
+            raise RuntimeError(
+                f"Whisper backend failed to load ({config.whisper_model}); "
+                "ensure the model is downloaded first"
+            )
         return stt
     return SenseVoiceSTT(config)

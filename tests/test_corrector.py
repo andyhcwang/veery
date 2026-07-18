@@ -118,7 +118,29 @@ class TestFillerRemoval:
         assert remove_fillers("um I think the API is uh broken") == "I think the API is broken"
 
     def test_chinese_fillers(self) -> None:
-        assert remove_fillers("嗯这个API额有问题") == "这个API有问题"
+        assert remove_fillers("嗯这个API 额 有问题") == "这个API 有问题"
+
+    def test_preserves_e_in_chinese_words(self) -> None:
+        assert remove_fillers("金额是五千") == "金额是五千"
+
+    def test_preserves_single_nage(self) -> None:
+        assert remove_fillers("那个文件") == "那个文件"
+
+    def test_collapses_stuttered_nage(self) -> None:
+        assert remove_fillers("那个那个文件") == "那个文件"
+
+    def test_removes_chinese_filler_without_spaces(self) -> None:
+        assert remove_fillers("嗯我觉得可以") == "我觉得可以"
+
+    def test_preserves_basically(self) -> None:
+        assert remove_fillers("this is basically done") == "this is basically done"
+
+    @pytest.mark.parametrize(
+        "text",
+        ["啊我知道", "就是说这样", "然后吧我们走", "you know this", "I mean it", "literally true"],
+    )
+    def test_preserves_ambiguous_fillers(self, text: str) -> None:
+        assert remove_fillers(text) == text
 
     def test_no_fillers(self) -> None:
         assert remove_fillers("the API is working") == "the API is working"

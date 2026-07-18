@@ -2,7 +2,7 @@
 # Uncomment and modify as needed.
 
 audio:
-  input_gain: 5.0  # Boost for quiet microphones (1.0 = no boost, 5.0 = 5x louder)
+  input_gain: 5.0  # Max boost for quiet mics; auto-capped per chunk so loud mics never clip
 #   sample_rate: 16000
 #   chunk_duration_ms: 32  # Must be 32ms for Silero VAD (512 samples at 16kHz)
 #   wait_timeout_sec: 30.0  # Timeout for wait-based recording flows

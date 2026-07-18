@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -149,6 +150,14 @@ class TestNoCorrectionWhenEmpty:
 
 
 class TestLoadPendingMalformedYaml:
+    def test_unparseable_yaml_starts_with_empty_pending(self, tmp_path: Path) -> None:
+        learned_path = tmp_path / "learned.yaml"
+        learned_path.write_text("pending: [unterminated")
+
+        learner = CorrectionLearner(_make_config(tmp_path))
+
+        assert learner._pending == {}
+
     def test_non_dict_yaml_root(self, tmp_path: Path) -> None:
         """If learned.yaml root is not a dict (e.g., a list), learner loads with empty pending."""
         learned_path = tmp_path / "learned.yaml"
@@ -237,6 +246,14 @@ class TestLoadYamlNonDictRoot:
         data = yaml.safe_load(learned_path.read_text())
         assert isinstance(data, dict)
         assert "Sharpe ratio" in data["terms"]
+
+
+class TestSaveFailures:
+    def test_save_yaml_never_raises(self, tmp_path: Path) -> None:
+        learner = CorrectionLearner(_make_config(tmp_path))
+
+        with patch("builtins.open", side_effect=OSError("disk full")):
+            learner._save_yaml({"terms": {}})
 
 
 class TestAttributeErrorInPending:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
+from threading import Event, Thread
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -23,26 +24,28 @@ class TestIsRepetitiveHallucination:
         assert _is_repetitive_hallucination("") is False
 
     def test_short_text_not_flagged(self) -> None:
-        """Fewer than 6 words should never be flagged."""
-        assert _is_repetitive_hallucination("Why Why Why Why Why") is False
+        """Fewer than 8 words should never be flagged."""
+        assert _is_repetitive_hallucination("Why Why Why Why Why Why Why") is False
 
-    def test_boundary_six_words_below_threshold(self) -> None:
-        """6 words where no single word exceeds 80%."""
-        assert _is_repetitive_hallucination("a b c d e f") is False
+    def test_six_repeated_words_pass_through(self) -> None:
+        """Deliberate six-word repetition is below the new length gate."""
+        assert _is_repetitive_hallucination("yes yes yes yes yes yes") is False
 
-    def test_boundary_six_words_at_threshold(self) -> None:
-        """6 words, 5 repetitions = 83% > 80% → hallucination."""
-        assert _is_repetitive_hallucination("Why Why Why Why Why ok") is True
+    def test_boundary_eight_words_above_threshold(self) -> None:
+        """8 words with 7 repetitions = 87.5% > 85%."""
+        assert _is_repetitive_hallucination("Why Why Why Why Why Why Why ok") is True
 
     def test_classic_hallucination(self) -> None:
         assert _is_repetitive_hallucination("Why Why Why Why Why Why Why Why") is True
 
     def test_case_insensitive(self) -> None:
         """Mixed casing should still be detected."""
-        assert _is_repetitive_hallucination("Thank thank THANK Thank thank Thank") is True
+        assert _is_repetitive_hallucination(
+            "Thank thank THANK Thank thank Thank THANK thank"
+        ) is True
 
     def test_legitimate_repetitive_speech(self) -> None:
-        """Legitimate text with some repetition but under 80%."""
+        """Legitimate text with some repetition but under 85%."""
         assert _is_repetitive_hallucination("go go go team go let us win") is False
 
     def test_normal_sentence(self) -> None:
@@ -61,12 +64,14 @@ class TestIsRepetitiveHallucination:
         from veery.app import State
 
         app._state = State.PROCESSING
-        app._stt.transcribe.return_value = "Why Why Why Why Why Why Why"
+        app._stt.transcribe.return_value = "Why Why Why Why Why Why Why Why"
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
+        app._overlay.hide.reset_mock()
 
-        app._process_segment(seg)
+        app._process_segment(seg, generation=1)
 
         app._overlay.show_warning.assert_called_with("Filtered repetitive audio")
+        app._overlay.hide.assert_not_called()
         assert app._state == State.IDLE
         assert app._session_count == 0
 
@@ -87,6 +92,7 @@ def app():
         patch("veery.app.AudioRecorder"),
         patch("veery.app.JargonCorrector"),
         patch("veery.app.TextCorrector"),
+        patch("veery.app.JargonUsageTracker"),
         patch("veery.app.CorrectionLearner"),
         patch("veery.app.OverlayIndicator"),
         patch("veery.app.PermissionGuideOverlay"),
@@ -99,6 +105,7 @@ def app():
         patch("veery.app.ensure_model_downloaded"),
         patch("veery.app.ensure_sensevoice_downloaded"),
         patch("veery.app.paste_to_active_app"),
+        patch("veery.app._check_accessibility", return_value=True),
         # Prevent real hotkey listener from starting
         patch("veery.app.VeeryApp._start_hotkey_listener"),
         # Prevent background thread for model loading — we call it synchronously
@@ -115,6 +122,10 @@ def app():
     vf_app._ready.set()
     # Give it a mock STT
     vf_app._stt = MagicMock()
+    # Direct _process_segment calls below simulate the first live worker.
+    vf_app._processing_generation = 1
+    # Keep prompt-ranking tests deterministic while avoiding real stats I/O.
+    vf_app._usage_tracker.rank.side_effect = lambda terms: list(terms)
 
     yield vf_app
 
@@ -388,13 +399,18 @@ class TestStopRecording:
         app._recorder.stop_and_flush.return_value = seg
 
         with patch("veery.app.threading.Thread") as mock_thread:
-            mock_instance = MagicMock()
-            mock_thread.return_value = mock_instance
+            worker = MagicMock()
+            watchdog = MagicMock()
+            mock_thread.side_effect = [worker, watchdog]
             app._stop_recording()
 
         assert app._state == State.PROCESSING
         app._recorder.stop_and_flush.assert_called_once_with(reason=StopReason.USER_STOP)
-        mock_instance.start.assert_called_once()
+        assert mock_thread.call_count == 2
+        worker.start.assert_called_once()
+        watchdog.start.assert_called_once()
+        assert mock_thread.call_args_list[1].kwargs["target"] == app._watch_processing
+        assert mock_thread.call_args_list[1].kwargs["args"][0] is worker
 
     def test_stop_recording_manual_cap_shows_message_and_processes(self, app) -> None:
         from veery.app import State
@@ -407,8 +423,9 @@ class TestStopRecording:
             patch("veery.app.threading.Thread") as mock_thread,
             patch("veery.app.rumps.notification") as mock_notification,
         ):
-            mock_instance = MagicMock()
-            mock_thread.return_value = mock_instance
+            worker = MagicMock()
+            watchdog = MagicMock()
+            mock_thread.side_effect = [worker, watchdog]
             app._stop_recording(reason=StopReason.MANUAL_CAP_REACHED)
 
         assert app._state == State.PROCESSING
@@ -418,7 +435,23 @@ class TestStopRecording:
             "Recording stopped",
             "Max dictation length reached",
         )
-        mock_instance.start.assert_called_once()
+        assert mock_thread.call_count == 2
+        worker.start.assert_called_once()
+        watchdog.start.assert_called_once()
+
+    def test_stop_recording_flush_failure_returns_to_idle(self, app) -> None:
+        from veery.app import State
+
+        app._state = State.RECORDING
+        app._recorder.stop_and_flush.side_effect = RuntimeError("device disappeared")
+        app._overlay.hide.reset_mock()
+
+        app._stop_recording()
+
+        assert app._state == State.IDLE
+        assert app._recording_finalizing is False
+        app._overlay.show_warning.assert_called_once_with("Recording failed")
+        app._overlay.hide.assert_not_called()
 
     def test_stop_recording_no_recorder(self, app) -> None:
         from veery.app import State
@@ -444,12 +477,14 @@ class TestProcessSegment:
         mock_result.final = "hello world"
         app._corrector.correct.return_value = mock_result
 
-        app._process_segment(seg)
+        with patch("veery.app._check_accessibility", return_value=True) as check_accessibility:
+            app._process_segment(seg, generation=1)
 
         assert app._state == State.IDLE
         assert app._session_count == 1
         assert app._last_pasted_text == "hello world"
         app._overlay.show_success.assert_called_once()
+        check_accessibility.assert_called_once_with()
 
     def test_process_segment_stt_none(self, app) -> None:
         from veery.app import State
@@ -457,7 +492,7 @@ class TestProcessSegment:
         app._stt = None
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
 
-        app._process_segment(seg)
+        app._process_segment(seg, generation=1)
 
         assert app._state == State.IDLE
         assert app._session_count == 0
@@ -467,24 +502,57 @@ class TestProcessSegment:
         app._state = State.PROCESSING
         app._stt.transcribe.return_value = ""
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
+        app._overlay.hide.reset_mock()
 
-        app._process_segment(seg)
+        app._process_segment(seg, generation=1)
 
         app._overlay.show_warning.assert_called_with("No speech detected")
+        app._overlay.hide.assert_not_called()
         assert app._state == State.IDLE
         assert app._session_count == 0
 
-    def test_process_segment_short_low_energy_skips_stt(self, app) -> None:
+    def test_process_segment_vad_confirmed_quiet_speech_reaches_stt(self, app) -> None:
+        import veery.app as app_module
         from veery.app import State
+
         app._state = State.PROCESSING
+        app._recorder.has_speech.return_value = True
+        app._stt.transcribe.return_value = "quiet speech"
+        result = MagicMock(final="quiet speech")
+        app._corrector.correct.return_value = result
         seg = FakeSegment(audio=np.zeros(12000, dtype=np.float32), sample_rate=16000, duration_sec=0.75)
 
-        app._process_segment(seg)
+        app_module.paste_to_active_app.reset_mock()
+        with patch("veery.app._check_accessibility", return_value=True):
+            app._process_segment(seg, generation=1)
+
+        app._stt.transcribe.assert_called_once()
+        app_module.paste_to_active_app.assert_called_once_with("quiet speech", app._config.output)
+        assert app._state == State.IDLE
+        assert app._session_count == 1
+
+    @pytest.mark.parametrize("vad_unavailable", ["no_recorder", "vad_error"])
+    def test_process_segment_short_low_energy_guard_when_vad_unavailable(
+        self, app, vad_unavailable: str
+    ) -> None:
+        from veery.app import State
+
+        app._state = State.PROCESSING
+        if vad_unavailable == "no_recorder":
+            app._recorder = None
+        else:
+            app._recorder.has_speech.side_effect = RuntimeError("VAD unavailable")
+        seg = FakeSegment(
+            audio=np.zeros(12000, dtype=np.float32),
+            sample_rate=16000,
+            duration_sec=0.75,
+        )
+
+        app._process_segment(seg, generation=1)
 
         app._stt.transcribe.assert_not_called()
-        app._overlay.show_warning.assert_called_with("No speech detected")
+        app._overlay.show_warning.assert_called_once_with("No speech detected")
         assert app._state == State.IDLE
-        assert app._session_count == 0
 
     def test_process_segment_vad_gate_rejects_no_speech(self, app) -> None:
         from veery.app import State
@@ -492,10 +560,12 @@ class TestProcessSegment:
         app._recorder.has_speech.return_value = False
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
 
-        app._process_segment(seg)
+        app._overlay.hide.reset_mock()
+        app._process_segment(seg, generation=1)
 
         app._stt.transcribe.assert_not_called()
         app._overlay.show_warning.assert_called_with("No speech detected")
+        app._overlay.hide.assert_not_called()
         assert app._state == State.IDLE
         assert app._session_count == 0
 
@@ -505,7 +575,7 @@ class TestProcessSegment:
         app._stt.transcribe.side_effect = RuntimeError("STT crash")
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
 
-        app._process_segment(seg)
+        app._process_segment(seg, generation=1)
 
         assert app._state == State.IDLE
         assert app._session_count == 0
@@ -518,7 +588,8 @@ class TestProcessSegment:
         app._stt.transcribe.return_value = "raw text"
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
 
-        app._process_segment(seg)
+        with patch("veery.app._check_accessibility", return_value=True):
+            app._process_segment(seg, generation=1)
 
         assert app._session_count == 1
         assert app._last_pasted_text == "raw text"
@@ -537,7 +608,8 @@ class TestProcessSegment:
         app._corrector.correct.return_value = mock_result
 
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
-        app._process_segment(seg)
+        with patch("veery.app._check_accessibility", return_value=True):
+            app._process_segment(seg, generation=1)
 
         original_stt.transcribe.assert_called_once()
 
@@ -550,10 +622,126 @@ class TestProcessSegment:
         app._corrector.correct.return_value = mock_result
         seg = FakeSegment(audio=np.zeros(16000, dtype=np.float32), sample_rate=16000)
 
-        app._process_segment(seg)
+        with patch("veery.app._check_accessibility", return_value=True):
+            app._process_segment(seg, generation=1)
 
         assert app._session_count == 1
         assert "1 dictation" in app._detail_item.title
+
+    def test_process_segment_empty_corrected_text_keeps_warning_visible(self, app) -> None:
+        from veery.app import State
+
+        app._state = State.PROCESSING
+        app._stt.transcribe.return_value = "um"
+        app._corrector.correct.return_value = MagicMock(final="")
+        app._overlay.hide.reset_mock()
+        seg = FakeSegment(audio=np.ones(16000, dtype=np.float32), sample_rate=16000)
+
+        app._process_segment(seg, generation=1)
+
+        app._overlay.show_warning.assert_called_once_with("Nothing left after cleanup")
+        app._overlay.hide.assert_not_called()
+
+    def test_process_segment_missing_accessibility_does_not_paste(self, app) -> None:
+        from veery.app import State
+
+        app._state = State.PROCESSING
+        app._stt.transcribe.return_value = "hello"
+        app._corrector.correct.return_value = MagicMock(final="hello")
+        seg = FakeSegment(audio=np.ones(16000, dtype=np.float32), sample_rate=16000)
+
+        with (
+            patch("veery.app._check_accessibility", return_value=False),
+            patch("veery.app.paste_to_active_app") as paste,
+        ):
+            app._process_segment(seg, generation=1)
+
+        paste.assert_not_called()
+        app._overlay.show_warning.assert_called_once_with("No Accessibility permission")
+        assert app._session_count == 0
+
+    def test_paste_precedes_non_fatal_learning_and_usage_tracking(self, app) -> None:
+        from veery.app import State
+
+        app._state = State.PROCESSING
+        app._stt.transcribe.return_value = "hello"
+        app._corrector.correct.return_value = MagicMock(final="hello")
+        seg = FakeSegment(audio=np.ones(16000, dtype=np.float32), sample_rate=16000)
+        events: list[str] = []
+
+        def fail_auto_learn(_text: str) -> None:
+            events.append("auto_learn")
+            raise RuntimeError("learning failed")
+
+        def fail_usage_tracking(_text: str) -> None:
+            events.append("usage")
+            raise RuntimeError("tracking failed")
+
+        with (
+            patch("veery.app._check_accessibility", return_value=True),
+            patch("veery.app.paste_to_active_app", side_effect=lambda *_: events.append("paste")),
+            patch.object(app, "_try_auto_learn", side_effect=fail_auto_learn),
+            patch.object(app, "_record_jargon_usage", side_effect=fail_usage_tracking),
+        ):
+            app._process_segment(seg, generation=1)
+
+        assert events == ["paste", "auto_learn", "usage"]
+        assert app._session_count == 1
+        app._overlay.show_success.assert_called_once_with()
+
+
+class TestProcessingWatchdog:
+    def _start_blocked_worker(self, app) -> tuple[Thread, Event]:
+        import veery.app as app_module
+        from veery.app import State
+
+        release = Event()
+        app._config = replace(
+            app._config,
+            stt=replace(app._config.stt, processing_timeout_sec=0.05),
+        )
+        app._state = State.PROCESSING
+        app._processing_generation = 1
+
+        def blocked_transcribe(*_args) -> str:
+            release.wait(timeout=1)
+            return "late text"
+
+        app._stt.transcribe.side_effect = blocked_transcribe
+        app._corrector.correct.return_value = MagicMock(final="late text")
+        app_module.paste_to_active_app.reset_mock()
+        segment = FakeSegment(audio=np.ones(16000, dtype=np.float32), sample_rate=16000)
+        worker = Thread(target=app._process_segment, args=(segment, 1), daemon=True)
+        worker.start()
+        return worker, release
+
+    def test_watchdog_resets_processing_state_to_idle(self, app) -> None:
+        from veery.app import State
+
+        worker, release = self._start_blocked_worker(app)
+        try:
+            app._watch_processing(worker, generation=1)
+            assert app._state == State.IDLE
+            assert app._is_processing_cancelled(1) is True
+            app._overlay.show_warning.assert_called_once_with("Transcription timed out")
+        finally:
+            release.set()
+            worker.join(timeout=1)
+
+    def test_late_worker_result_is_discarded_without_paste(self, app) -> None:
+        import veery.app as app_module
+
+        worker, release = self._start_blocked_worker(app)
+        try:
+            app._watch_processing(worker, generation=1)
+            release.set()
+            worker.join(timeout=1)
+            assert worker.is_alive() is False
+            app_module.paste_to_active_app.assert_not_called()
+            assert app._session_count == 0
+        finally:
+            release.set()
+            worker.join(timeout=1)
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +822,20 @@ class TestTryAutoLearn:
 
 
 # ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+
+class TestNotifications:
+    def test_notify_swallows_rumps_runtime_error(self, app) -> None:
+        with patch(
+            "veery.app.rumps.notification",
+            side_effect=RuntimeError("not running from an app bundle"),
+        ):
+            app._notify("Veery", "Test", "message")
+
+
+# ---------------------------------------------------------------------------
 # Manual edit learning
 # ---------------------------------------------------------------------------
 
@@ -684,6 +886,21 @@ class TestManualEditLearning:
 
         app_module.JargonCorrector.assert_called_once_with(app._config.jargon)
         app_module.TextCorrector.assert_called_once()
+
+    def test_manual_edit_promotion_survives_notification_failure(self, app) -> None:
+        app._learner.log_correction.return_value = "Sharpe ratio"
+        app._begin_manual_edit_monitor("sharp ratio")
+        for _ in range(6):
+            app._on_global_key_press("Key.left")
+        app._on_global_key_press(FakeCharKey("e"))
+
+        with patch(
+            "veery.app.rumps.notification",
+            side_effect=RuntimeError("notification unavailable"),
+        ):
+            app._finalize_manual_edit_learning()
+
+        app._learner.log_correction.assert_called_once_with("sharp ratio", "sharpe ratio")
 
 
 # ---------------------------------------------------------------------------

@@ -297,6 +297,48 @@ class TestConfigFromYAML:
         assert config.stt.model_name == "iic/SenseVoiceSmall"
         assert config.stt.language == "auto"
 
+    def test_invalid_runtime_settings_reset_to_safe_defaults(self, tmp_path: Path, caplog) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            textwrap.dedent("""\
+                vad:
+                  threshold: 1.0
+                  silence_duration_sec: 0
+                  min_speech_duration_sec: -0.1
+                stt:
+                  backend: unknown
+                  processing_timeout_sec: 0
+                jargon:
+                  fuzzy_threshold: 82.5
+                hotkey:
+                  key_combo: space
+                  mode: latch
+            """)
+        )
+
+        with caplog.at_level(logging.WARNING):
+            config = load_config(config_file)
+
+        assert config.stt.backend == "whisper"
+        assert config.stt.processing_timeout_sec == 120.0
+        assert config.vad.threshold == 0.4
+        assert config.vad.silence_duration_sec == 2.0
+        assert config.vad.min_speech_duration_sec == 0.3
+        assert config.jargon.fuzzy_threshold == 82
+        assert config.hotkey.key_combo == "right_cmd"
+        assert config.hotkey.mode == "hold"
+        for setting in (
+            "stt.backend",
+            "stt.processing_timeout_sec",
+            "vad.threshold",
+            "vad.silence_duration_sec",
+            "vad.min_speech_duration_sec",
+            "jargon.fuzzy_threshold",
+            "hotkey.key_combo",
+            "hotkey.mode",
+        ):
+            assert setting in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # 7. Config partial YAML (defaults fill missing fields)

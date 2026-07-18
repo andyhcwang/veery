@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -12,11 +14,19 @@ import pytest
 
 from veery.config import STTConfig
 
+
+@pytest.fixture
+def cached_whisper_model():
+    """Prevent Whisper unit tests from consulting or downloading a real model."""
+    with patch("veery.stt._is_model_cached", return_value=True):
+        yield
+
 # ---------------------------------------------------------------------------
 # WhisperSTT
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("cached_whisper_model")
 class TestWhisperSTT:
     def test_transcribe_success(self) -> None:
         """Mock mlx_whisper.transcribe, verify WhisperSTT returns cleaned text."""
@@ -41,8 +51,10 @@ class TestWhisperSTT:
         mock_mlx.transcribe.assert_called_once()
         call_kwargs = mock_mlx.transcribe.call_args.kwargs
         assert call_kwargs["condition_on_previous_text"] is False
-        assert call_kwargs["no_speech_threshold"] == 0.35
-        assert call_kwargs["logprob_threshold"] is None
+        assert call_kwargs["no_speech_threshold"] == 0.6
+        assert call_kwargs["logprob_threshold"] == -1.0
+        assert call_kwargs["temperature"] == (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+        assert call_kwargs["hallucination_silence_threshold"] == 0.2
 
     def test_transcribe_empty_audio(self) -> None:
         """Empty audio array returns ''."""
@@ -72,8 +84,8 @@ class TestWhisperSTT:
 
         assert result == ""
 
-    def test_transcribe_temp_file_reused(self, tmp_path) -> None:
-        """Verify the same pre-allocated temp wav path is reused across calls."""
+    def test_transcribe_uses_fresh_temp_files_and_unlinks_them(self) -> None:
+        """Each call gets an isolated WAV path that is removed afterward."""
         from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
@@ -92,13 +104,14 @@ class TestWhisperSTT:
 
         assert result1 == "hello"
         assert result2 == "hello"
-        # Both calls should use the same pre-allocated temp path
         calls = mock_mlx.transcribe.call_args_list
-        assert calls[0][0][0] == calls[1][0][0]
-        assert calls[0][0][0] == stt._tmp_wav
+        paths = [call.args[0] for call in calls]
+        assert paths[0] != paths[1]
+        assert stt._tmp_wav not in paths
+        assert all(not Path(path).exists() for path in paths)
 
-    def test_transcribe_temp_file_survives_error(self) -> None:
-        """Temp file persists for reuse even when transcription raises."""
+    def test_transcribe_temp_file_is_unlinked_after_error(self) -> None:
+        """The per-call WAV is removed even when transcription raises."""
         from veery.stt import WhisperSTT
 
         stt = WhisperSTT(STTConfig(backend="whisper"))
@@ -120,8 +133,26 @@ class TestWhisperSTT:
 
         assert result == ""
         assert len(created_paths) == 1
-        # The pre-allocated temp path should be the same as the instance's
-        assert created_paths[0] == stt._tmp_wav
+        assert created_paths[0] != stt._tmp_wav
+        assert Path(created_paths[0]).exists() is False
+
+    def test_transcribe_returns_early_when_model_not_cached(self) -> None:
+        from veery.stt import WhisperSTT
+
+        stt = WhisperSTT(STTConfig(backend="whisper"))
+        audio = np.ones(16000, dtype=np.float32)
+        mock_sf = MagicMock()
+        mock_mlx = MagicMock()
+
+        with (
+            patch("veery.stt._is_model_cached", return_value=False),
+            patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
+        ):
+            result = stt.transcribe(audio, 16000)
+
+        assert result == ""
+        mock_sf.write.assert_not_called()
+        mock_mlx.transcribe.assert_not_called()
 
     def test_load_model_warmup(self) -> None:
         """load_model() transcribes a silent wav to warm up, sets _loaded."""
@@ -249,6 +280,12 @@ class TestWhisperSTT:
         assert stt._config.backend == "whisper"
         assert stt._config.whisper_model == "mlx-community/whisper-large-v3-turbo"
 
+    def test_energy_gate_uses_relaxed_thresholds(self) -> None:
+        from veery.stt import WhisperSTT
+
+        assert WhisperSTT._MIN_RMS_ENERGY == 0.003
+        assert WhisperSTT._MIN_ACTIVE_FRAME_RMS == 0.008
+
     def test_transcribe_passes_language_and_prompt_hints(self) -> None:
         """Configured language and jargon prompt should be forwarded to mlx-whisper."""
         from veery.stt import WhisperSTT
@@ -303,6 +340,7 @@ class TestWhisperSTT:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("cached_whisper_model")
 class TestCreateSTT:
     def test_create_stt_sensevoice(self) -> None:
         """backend='sensevoice' returns SenseVoiceSTT."""
@@ -335,19 +373,51 @@ class TestCreateSTT:
         """Default config creates WhisperSTT."""
         from veery.stt import WhisperSTT, create_stt
 
-        with patch("veery.stt.WhisperSTT.load_model"):
+        mock_sf = MagicMock()
+        mock_mlx = MagicMock()
+        mock_mlx.transcribe.return_value = {"text": ""}
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}):
             stt = create_stt()
 
         assert isinstance(stt, WhisperSTT)
+        assert stt._loaded is True
 
-    def test_create_stt_invalid_backend_returns_sensevoice(self) -> None:
-        """Unknown backend falls through to SenseVoiceSTT (current behavior)."""
-        from veery.stt import SenseVoiceSTT, create_stt
+    def test_create_stt_invalid_backend_falls_back_to_whisper(self, caplog) -> None:
+        """Unknown backends warn and use Whisper."""
+        from veery.stt import WhisperSTT, create_stt
 
-        with patch("veery.stt.SenseVoiceSTT._load_model"):
+        mock_sf = MagicMock()
+        mock_mlx = MagicMock()
+        mock_mlx.transcribe.return_value = {"text": ""}
+        with (
+            caplog.at_level(logging.WARNING),
+            patch.dict("sys.modules", {"mlx_whisper": mock_mlx, "soundfile": mock_sf}),
+        ):
             stt = create_stt(STTConfig(backend="nonexistent"))
 
-        assert isinstance(stt, SenseVoiceSTT)
+        assert isinstance(stt, WhisperSTT)
+        assert stt._config.backend == "whisper"
+        assert "using whisper" in caplog.text
+
+    def test_create_stt_whisper_raises_when_model_not_cached(self) -> None:
+        from veery.stt import create_stt
+
+        with (
+            patch("veery.stt._is_model_cached", return_value=False),
+            pytest.raises(RuntimeError, match="Whisper backend failed to load"),
+        ):
+            create_stt(STTConfig(backend="whisper"))
+
+    def test_sensevoice_load_failure_is_raised(self) -> None:
+        from veery.stt import SenseVoiceSTT
+
+        mock_funasr = MagicMock()
+        mock_funasr.AutoModel.side_effect = RuntimeError("model load failed")
+        with (
+            patch.dict("sys.modules", {"funasr": mock_funasr}),
+            pytest.raises(RuntimeError, match="model load failed"),
+        ):
+            SenseVoiceSTT(STTConfig(backend="sensevoice"))
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +438,7 @@ class TestSTTConfigDefaults:
         assert cfg.whisper_prompt_terms_limit == 64
         assert cfg.whisper_prompt_char_limit == 400
         assert cfg.whisper_initial_prompt is None
+        assert cfg.processing_timeout_sec == 120.0
 
     def test_stt_config_custom_values(self) -> None:
         """STTConfig accepts custom overrides."""
@@ -381,6 +452,28 @@ class TestSTTConfigDefaults:
         assert cfg.whisper_model == "mlx-community/whisper-small"
         assert cfg.whisper_initial_prompt == "Company glossary."
         assert cfg.whisper_prompt_terms_limit == 12
+
+
+# ---------------------------------------------------------------------------
+# _is_model_cached
+# ---------------------------------------------------------------------------
+
+
+class TestWhisperCacheCheck:
+    def test_incomplete_blob_invalidates_otherwise_complete_cache(self, tmp_path: Path) -> None:
+        from veery.stt import _is_model_cached
+
+        model_dir = tmp_path / "models--org--name"
+        snapshot = model_dir / "snapshots" / "revision"
+        blobs = model_dir / "blobs"
+        snapshot.mkdir(parents=True)
+        blobs.mkdir()
+        (snapshot / "config.json").write_text("{}")
+        (blobs / "bighash").write_bytes(b"x" * 1_000_001)
+        (blobs / "foo.incomplete").touch()
+
+        with patch("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path)):
+            assert _is_model_cached("org/name") is False
 
 
 # ---------------------------------------------------------------------------

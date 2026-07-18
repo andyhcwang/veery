@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from veery.config import PROJECT_ROOT, JargonConfig
-from veery.jargon import JargonCorrector, JargonDictionary
+from veery.jargon import JargonCorrector, JargonDictionary, JargonUsageTracker
 
 QUANT_DICT = str(PROJECT_ROOT / "jargon" / "quant_finance.yaml")
 TECH_DICT = str(PROJECT_ROOT / "jargon" / "tech.yaml")
@@ -301,3 +301,61 @@ class TestYamlEdgeCases:
             d = JargonDictionary(cfg)
         assert len(d.reverse_index) == 0
         assert "malformed" in caplog.text.lower()
+
+
+class TestJargonUsageTracker:
+    def test_record_flushes_every_n_records(self, tmp_path: Path) -> None:
+        stats_path = tmp_path / "usage_stats.yaml"
+        tracker = JargonUsageTracker(stats_path, flush_every=2)
+
+        assert tracker.record(["API"]) is False
+        assert stats_path.exists() is False
+        assert tracker.record(["API", "PnL"]) is True
+
+        data = yaml.safe_load(stats_path.read_text())
+        assert data["terms"]["API"]["count"] == 2
+        assert data["terms"]["PnL"]["count"] == 1
+        assert data["terms"]["API"]["last_used"]
+
+    def test_rank_uses_count_then_recency_then_original_order(self, tmp_path: Path) -> None:
+        stats_path = tmp_path / "usage_stats.yaml"
+        stats_path.write_text(
+            yaml.safe_dump(
+                {
+                    "terms": {
+                        "high": {"count": 3, "last_used": "2026-01-01"},
+                        "older": {"count": 2, "last_used": "2026-01-01"},
+                        "recent": {"count": 2, "last_used": "2026-07-18"},
+                    }
+                }
+            )
+        )
+        tracker = JargonUsageTracker(stats_path)
+
+        ranked = tracker.rank(["unused-a", "older", "recent", "high", "unused-b"])
+
+        assert ranked == ["high", "recent", "older", "unused-a", "unused-b"]
+
+    def test_flush_writes_pending_stats(self, tmp_path: Path) -> None:
+        stats_path = tmp_path / "nested" / "usage_stats.yaml"
+        tracker = JargonUsageTracker(stats_path, flush_every=5)
+        tracker.record(["Voiceflow"])
+
+        tracker.flush()
+
+        data = yaml.safe_load(stats_path.read_text())
+        assert set(data) == {"terms"}
+        assert set(data["terms"]["Voiceflow"]) == {"count", "last_used"}
+        assert data["terms"]["Voiceflow"]["count"] == 1
+        assert data["terms"]["Voiceflow"]["last_used"]
+
+    def test_malformed_stats_file_starts_fresh(self, tmp_path: Path) -> None:
+        stats_path = tmp_path / "usage_stats.yaml"
+        stats_path.write_text("terms: [unterminated")
+
+        tracker = JargonUsageTracker(stats_path, flush_every=1)
+
+        assert tracker.rank(["first", "second"]) == ["first", "second"]
+        assert tracker.record(["API"]) is True
+        data = yaml.safe_load(stats_path.read_text())
+        assert data["terms"]["API"]["count"] == 1

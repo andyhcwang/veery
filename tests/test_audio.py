@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from veery.audio import AudioRecorder, AudioSegment, StopReason, _State
 from veery.config import AudioConfig, VADConfig
@@ -50,6 +51,20 @@ class TestVADStateMachine:
     def test_initial_state_is_waiting(self) -> None:
         rec = _make_recorder()
         assert rec.state == _State.WAITING
+    def test_gain_is_capped_for_loud_chunks_and_full_for_quiet_chunks(self) -> None:
+        rec = _make_recorder(audio_cfg=AudioConfig(input_gain=5.0))
+
+        with patch.object(rec, "_process_vad_chunk") as process_chunk:
+            rec._audio_callback(_chunk(0.5), 512, None, MagicMock(spec=False))
+            loud = process_chunk.call_args.args[0]
+
+            process_chunk.reset_mock()
+            rec._audio_callback(_chunk(0.05), 512, None, MagicMock(spec=False))
+            quiet = process_chunk.call_args.args[0]
+
+        assert np.max(np.abs(loud)) <= 0.98 + 1e-6
+        assert np.allclose(loud, 0.5 * 1.96)
+        assert np.allclose(quiet, 0.05 * 5.0)
 
     def test_speech_transitions_to_speech_detected(self) -> None:
         rec = _make_recorder()
@@ -343,6 +358,20 @@ class TestStreamLifecycle:
             rec.prepare_stream()
         mock_sd.InputStream.assert_not_called()
 
+    def test_prepare_stream_start_failure_closes_and_discards_stream(self) -> None:
+        rec = _make_recorder()
+        mock_stream = MagicMock()
+        mock_stream.start.side_effect = RuntimeError("device unavailable")
+
+        with (
+            patch("veery.audio.sd.InputStream", return_value=mock_stream),
+            pytest.raises(RuntimeError, match="device unavailable"),
+        ):
+            rec.prepare_stream()
+
+        mock_stream.close.assert_called_once_with()
+        assert rec._stream is None
+
     def test_start_recording_calls_prepare_if_no_stream(self) -> None:
         rec = _make_recorder()
         rec._vad_model = MagicMock()  # pre-loaded
@@ -373,6 +402,17 @@ class TestStreamLifecycle:
         mock_stream.close.assert_called_once()
         assert rec._stream is None
         assert rec._done_event.is_set()
+
+    def test_close_stream_swallows_stop_failure_and_clears_reference(self) -> None:
+        rec = _make_recorder()
+        mock_stream = MagicMock()
+        mock_stream.stop.side_effect = RuntimeError("device disconnected")
+        rec._stream = mock_stream
+
+        rec._close_stream()
+
+        mock_stream.stop.assert_called_once_with()
+        assert rec._stream is None
 
     def test_stop_and_flush_uses_raw_fallback(self) -> None:
         vad_cfg = VADConfig(min_speech_duration_sec=0.05)
@@ -415,18 +455,30 @@ class TestStreamLifecycle:
         mock_stream.stop.assert_called_once()
 
     def test_stop_and_flush_waiting_with_voice_energy_uses_raw_fallback(self) -> None:
-        """Manual stop should recover speech even if VAD never left WAITING."""
+        """Eight active frames survive a long quiet hold without ratio/RMS gates."""
         rec = _make_recorder()
         mock_stream = MagicMock()
         rec._stream = mock_stream
-        rec._raw_buffer.append(np.full(16000, 0.015, dtype=np.float32))
+        mostly_silent = np.zeros(160000, dtype=np.float32)
+        mostly_silent[: 8 * 320] = 0.02
+        rec._raw_buffer.append(mostly_silent)
         rec._state = _State.WAITING
 
         seg = rec.stop_and_flush()
 
         assert seg is not None
-        assert seg.duration_sec == 1.0
+        assert seg.duration_sec == 10.0
         mock_stream.stop.assert_called_once()
+
+    def test_stop_and_flush_waiting_seven_active_frames_rejected(self) -> None:
+        rec = _make_recorder()
+        mock_stream = MagicMock()
+        rec._stream = mock_stream
+        audio = np.zeros(16000, dtype=np.float32)
+        audio[: 7 * 320] = 0.02
+        rec._raw_buffer.append(audio)
+
+        assert rec.stop_and_flush() is None
 
     def test_stop_and_flush_waiting_short_click_rejected(self) -> None:
         """Very short key-click-like bursts should not trigger raw fallback."""
@@ -559,3 +611,31 @@ class TestHasSpeech:
 
         assert rec.has_speech(audio) is False
         assert not rec._done_event.is_set()
+
+    def test_has_speech_accepts_two_borderline_consecutive_frames_below_one_second(
+        self,
+    ) -> None:
+        rec = _make_recorder(vad_cfg=VADConfig(threshold=0.4))
+        rec._vad_model = MagicMock(return_value=MagicMock(item=MagicMock(return_value=0.31)))
+        audio = np.zeros(2 * rec._audio_cfg.chunk_samples, dtype=np.float32)
+
+        assert rec.has_speech(audio) is True
+
+    def test_has_speech_requires_three_frames_at_one_second(self) -> None:
+        rec = _make_recorder(vad_cfg=VADConfig(threshold=0.4))
+        probs = iter([0.31, 0.31] + [0.1] * 64)
+        rec._vad_model = MagicMock(
+            return_value=MagicMock(item=MagicMock(side_effect=lambda: next(probs)))
+        )
+
+        assert rec.has_speech(np.zeros(16000, dtype=np.float32)) is False
+
+    def test_has_speech_requires_two_consecutive_frames(self) -> None:
+        rec = _make_recorder(vad_cfg=VADConfig(threshold=0.4))
+        probs = iter([0.31, 0.1, 0.31])
+        rec._vad_model = MagicMock(
+            return_value=MagicMock(item=MagicMock(side_effect=lambda: next(probs)))
+        )
+        audio = np.zeros(3 * rec._audio_cfg.chunk_samples, dtype=np.float32)
+
+        assert rec.has_speech(audio) is False

@@ -39,8 +39,12 @@ class CorrectionLearner:
         """Load pending corrections from learned.yaml's 'pending' section."""
         if not self._learned_path.exists():
             return
-        with open(self._learned_path) as f:
-            data = yaml.safe_load(f) or {}
+        try:
+            with open(self._learned_path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            logger.warning("learned.yaml unreadable, starting with empty pending", exc_info=True)
+            return
         if not isinstance(data, dict):
             logger.warning("learned.yaml root is not a dict, ignoring: %s", type(data).__name__)
             return
@@ -178,8 +182,12 @@ class CorrectionLearner:
     def _load_yaml(self) -> dict:
         """Load learned.yaml or return empty structure."""
         if self._learned_path.exists():
-            with open(self._learned_path) as f:
-                data = yaml.safe_load(f) or {}
+            try:
+                with open(self._learned_path) as f:
+                    data = yaml.safe_load(f) or {}
+            except Exception:
+                logger.warning("learned.yaml unreadable, treating as empty", exc_info=True)
+                return {}
             if not isinstance(data, dict):
                 logger.warning("learned.yaml root is not a dict, treating as empty: %s", type(data).__name__)
                 return {}
@@ -187,7 +195,14 @@ class CorrectionLearner:
         return {}
 
     def _save_yaml(self, data: dict) -> None:
-        """Write data to learned.yaml, creating parent dirs if needed."""
-        self._learned_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._learned_path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        """Write data to learned.yaml, creating parent dirs if needed.
+
+        A failed save must never break dictation (callers run on hot paths), so
+        errors are logged rather than raised.
+        """
+        try:
+            self._learned_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._learned_path, "w") as f:
+                yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        except Exception:
+            logger.exception("Failed to save learned.yaml; correction not persisted")
