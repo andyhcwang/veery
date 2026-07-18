@@ -478,12 +478,19 @@ class SenseVoiceSTT:
             self._model = None
             raise
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = 16000,
+        context_prompt: str | None = None,
+    ) -> str:
         """Transcribe a numpy audio array to text.
 
         Args:
             audio: 1-D float32 numpy array of audio samples.
             sample_rate: Sample rate in Hz (SenseVoice expects 16kHz).
+            context_prompt: Accepted for interface parity with WhisperSTT;
+                FunASR has no prompt conditioning, so it is ignored.
 
         Returns:
             Cleaned transcription string, or "" on error.
@@ -552,7 +559,7 @@ class WhisperSTT:
         prompt = (prompt or "").strip()
         self._runtime_prompt = prompt or None
 
-    def _build_initial_prompt(self) -> str | None:
+    def _build_initial_prompt(self, context_prompt: str | None = None) -> str | None:
         parts: list[str] = []
         static_prompt = self._config.whisper_initial_prompt
         if static_prompt is not None:
@@ -561,6 +568,10 @@ class WhisperSTT:
                 parts.append(static_prompt)
         if self._runtime_prompt is not None:
             parts.append(self._runtime_prompt)
+        if context_prompt:
+            # Rolling committed-text tail goes LAST (closest to the audio) so
+            # Whisper conditions the segment start on the preceding speech.
+            parts.append(context_prompt.strip())
         if not parts:
             return None
 
@@ -632,12 +643,20 @@ class WhisperSTT:
 
         return True
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = 16000,
+        context_prompt: str | None = None,
+    ) -> str:
         """Transcribe a numpy audio array to text.
 
         Args:
             audio: 1-D float32 numpy array of audio samples.
             sample_rate: Sample rate in Hz.
+            context_prompt: Optional tail of previously-transcribed text,
+                appended to the initial_prompt for continuity across
+                streaming segments.
 
         Returns:
             Transcription string, or "" on error.
@@ -699,7 +718,7 @@ class WhisperSTT:
             }
             if self._config.language != "auto":
                 transcribe_kwargs["language"] = self._config.language
-            initial_prompt = self._build_initial_prompt()
+            initial_prompt = self._build_initial_prompt(context_prompt)
             if initial_prompt is not None:
                 transcribe_kwargs["initial_prompt"] = initial_prompt
 

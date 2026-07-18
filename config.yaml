@@ -40,4 +40,5 @@ streaming:
 #   min_segment_sec: 1.0          # Don't cut segments with less speech than this
 #   max_segment_sec: 18.0         # Force-cut monologues without pauses
 #   overlap_ms: 200               # Audio prepended across cuts so words aren't clipped
-#   drain_timeout_sec: 3.0        # Max wait for in-flight segments at key release
+#   drain_timeout_sec: 3.0         # Max wait for in-flight segments at key release
+#   rolling_prompt_chars: 120     # Committed-text tail fed to next segment for context (0 disables)

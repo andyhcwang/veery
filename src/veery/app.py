@@ -132,13 +132,25 @@ def _is_cjk_char(ch: str) -> bool:
 # Never put a space BEFORE these when splicing English fragments.
 _NO_SPACE_BEFORE = set(".,;:!?)]}%'\"…")
 
+# Segment-final characters that already terminate/punctuate a clause — no
+# comma needed at the join.
+_JOIN_PUNCT = set(".,;:!?…、。「」『』()【】\"'") | {
+    "\uff0c", "\uff1b", "\uff1a", "\uff01", "\uff1f",  # ，；：！？
+    "\uff08", "\uff09", "\uff0e", "\u2018", "\u2019", "\u201c", "\u201d",
+}
+
 
 def _splice_texts(parts: list[str]) -> str:
     """Join per-segment transcripts into one text.
 
-    Whisper emits clean per-segment text; the join rule is: no space at CJK
-    boundaries or before punctuation, a single space between Latin words.
-    This yields correct spacing for Chinese/English code-switched output.
+    Join rules (validated against real CN/EN code-switched dictation):
+    - no space at CJK boundaries or before punctuation, a single space
+      between Latin words;
+    - an unpunctuated CJK->CJK join gets a Chinese comma: the >=0.7s pause
+      that cut the segment almost always marks at least a clause break,
+      and per-segment Whisper can't see across the cut to punctuate it.
+      (CJK<->Latin joins are left alone — code-switch pauses are often
+      mid-clause, e.g. "帮我" + "review这个PR".)
     """
     out = ""
     for part in parts:
@@ -149,7 +161,9 @@ def _splice_texts(parts: list[str]) -> str:
             out = part
             continue
         prev, nxt = out[-1], part[0]
-        if _is_cjk_char(prev) or _is_cjk_char(nxt) or nxt in _NO_SPACE_BEFORE:
+        if _is_cjk_char(prev) and _is_cjk_char(nxt) and prev not in _JOIN_PUNCT and nxt not in _JOIN_PUNCT:
+            out += "\uff0c" + part
+        elif _is_cjk_char(prev) or _is_cjk_char(nxt) or nxt in _NO_SPACE_BEFORE:
             out += part
         else:
             out += " " + part
@@ -166,11 +180,12 @@ class _StreamingSession:
     failed or still-running segment) is re-covered by the release tail.
     """
 
-    def __init__(self, stt, sample_rate: int) -> None:
+    def __init__(self, stt, sample_rate: int, rolling_prompt_chars: int = 120) -> None:
         import queue
 
         self._stt = stt
         self._sample_rate = sample_rate
+        self._rolling_prompt_chars = max(0, rolling_prompt_chars)
         self._queue: object = queue.SimpleQueue()
         self._results: dict[int, tuple[str | None, int]] = {}
         self._lock = threading.Lock()
@@ -216,9 +231,20 @@ class _StreamingSession:
             try:
                 audio = np.concatenate(chunks)
                 t0 = time.monotonic()
-                text = self._stt.transcribe(audio, self._sample_rate)
+                context = self._context_for_next()
+                if context:
+                    text = self._stt.transcribe(
+                        audio, self._sample_rate, context_prompt=context
+                    )
+                else:
+                    text = self._stt.transcribe(audio, self._sample_rate)
                 if text and _is_repetitive_hallucination(text):
                     logger.warning("Streaming segment %d looks hallucinated, dropping text", seq)
+                    text = ""
+                if text and seq > 0 and self._same_as_previous(seq, text):
+                    # Rolling-prompt echo guard: a segment decoding to exactly
+                    # the previous segment's text is a conditioning artifact.
+                    logger.warning("Streaming segment %d repeats segment %d, dropping", seq, seq - 1)
                     text = ""
                 logger.info(
                     "Streaming segment %d: %.1fs audio -> %d chars in %dms",
@@ -232,6 +258,19 @@ class _StreamingSession:
                 text = None
             with self._lock:
                 self._results[seq] = (text, end_chunk)
+
+    def _context_for_next(self) -> str | None:
+        """Tail of the contiguous committed text, for prompt conditioning."""
+        if self._rolling_prompt_chars <= 0:
+            return None
+        parts, _ = self.committed()
+        context = _splice_texts(parts)
+        return context[-self._rolling_prompt_chars:] or None
+
+    def _same_as_previous(self, seq: int, text: str) -> bool:
+        with self._lock:
+            prev = self._results.get(seq - 1)
+        return prev is not None and prev[0] == text
 
 
 class VeeryApp(rumps.App):
@@ -1179,7 +1218,11 @@ class VeeryApp(rumps.App):
             and self._stt is not None
         ):
             try:
-                session = _StreamingSession(self._stt, self._config.audio.sample_rate)
+                session = _StreamingSession(
+                    self._stt,
+                    self._config.audio.sample_rate,
+                    self._config.streaming.rolling_prompt_chars,
+                )
                 self._recorder.set_finalize_callback(session.enqueue)
                 self._streaming_session = session
             except Exception:
@@ -1514,8 +1557,15 @@ class VeeryApp(rumps.App):
                             return
                     else:
                         t_stt = time.monotonic()
+                        rolling = self._config.streaming.rolling_prompt_chars
+                        context = _splice_texts(committed)[-rolling:] if (committed and rolling > 0) else None
                         try:
-                            tail_text = stt.transcribe(segment.audio, segment.sample_rate)
+                            if context:
+                                tail_text = stt.transcribe(
+                                    segment.audio, segment.sample_rate, context_prompt=context
+                                )
+                            else:
+                                tail_text = stt.transcribe(segment.audio, segment.sample_rate)
                         except STTError as e:
                             if not has_committed:
                                 raise

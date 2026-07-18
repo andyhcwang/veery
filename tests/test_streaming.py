@@ -156,7 +156,7 @@ class TestStreamingSession:
         stt = MagicMock()
         calls = {"n": 0}
 
-        def transcribe(audio, sr):
+        def transcribe(audio, sr, context_prompt=None):
             result = texts.get(calls["n"], "")
             calls["n"] += 1
             if isinstance(result, Exception):
@@ -223,8 +223,9 @@ class TestSpliceTexts:
     def test_english_parts_get_spaces(self) -> None:
         assert _splice_texts(["Hello there", "how are you"]) == "Hello there how are you"
 
-    def test_cjk_parts_join_without_space(self) -> None:
-        assert _splice_texts(["你好世界", "今天天气不错"]) == "你好世界今天天气不错"
+    def test_cjk_parts_join_gets_clause_comma(self) -> None:
+        # A >=0.7s pause between two Chinese clauses warrants a comma.
+        assert _splice_texts(["你好世界", "今天天气不错"]) == "你好世界\uff0c今天天气不错"
 
     def test_mixed_cjk_english_boundaries(self) -> None:
         assert _splice_texts(["让Claude帮我", "review这个PR"]) == "让Claude帮我review这个PR"
@@ -238,3 +239,60 @@ class TestSpliceTexts:
 
     def test_all_empty_returns_empty(self) -> None:
         assert _splice_texts(["", "  "]) == ""
+
+
+class TestRollingPrompt:
+    def test_second_segment_gets_committed_context(self) -> None:
+        stt = MagicMock()
+        stt.transcribe.side_effect = lambda a, sr, context_prompt=None: "hello world"
+        session = _StreamingSession(stt, 16000, rolling_prompt_chars=120)
+        session.enqueue(0, [np.zeros(512, dtype=np.float32)], 10)
+        session.enqueue(1, [np.zeros(512, dtype=np.float32)], 20)
+        assert session.drain(5.0)
+        first, second = stt.transcribe.call_args_list
+        assert "context_prompt" not in first.kwargs or first.kwargs["context_prompt"] is None
+        assert second.kwargs["context_prompt"] == "hello world"
+
+    def test_context_is_capped_to_rolling_chars(self) -> None:
+        stt = MagicMock()
+        stt.transcribe.side_effect = lambda a, sr, context_prompt=None: "x" * 500
+        session = _StreamingSession(stt, 16000, rolling_prompt_chars=50)
+        session.enqueue(0, [np.zeros(512, dtype=np.float32)], 10)
+        session.enqueue(1, [np.zeros(512, dtype=np.float32)], 20)
+        assert session.drain(5.0)
+        second = stt.transcribe.call_args_list[1]
+        assert len(second.kwargs["context_prompt"]) == 50
+
+    def test_zero_rolling_chars_never_passes_context(self) -> None:
+        stt = MagicMock()
+        stt.transcribe.side_effect = lambda a, sr, context_prompt=None: "hello"
+        session = _StreamingSession(stt, 16000, rolling_prompt_chars=0)
+        session.enqueue(0, [np.zeros(512, dtype=np.float32)], 10)
+        session.enqueue(1, [np.zeros(512, dtype=np.float32)], 20)
+        assert session.drain(5.0)
+        for call in stt.transcribe.call_args_list:
+            assert "context_prompt" not in call.kwargs
+
+    def test_identical_consecutive_segment_dropped_as_echo(self) -> None:
+        stt = MagicMock()
+        stt.transcribe.side_effect = lambda a, sr, context_prompt=None: "同样的话就是这句"
+        session = _StreamingSession(stt, 16000, rolling_prompt_chars=120)
+        session.enqueue(0, [np.zeros(512, dtype=np.float32)], 10)
+        session.enqueue(1, [np.zeros(512, dtype=np.float32)], 20)
+        assert session.drain(5.0)
+        parts, end = session.committed()
+        assert parts == ["同样的话就是这句", ""]
+        assert end == 20
+
+
+class TestSpliceJoinPunctuation:
+    def test_unpunctuated_cjk_join_gets_comma(self) -> None:
+        assert _splice_texts(["检查一下延迟", "预期体感差不多"]) == "检查一下延迟，预期体感差不多"
+
+    def test_punctuated_cjk_join_left_alone(self) -> None:
+        assert _splice_texts(["第一句。", "第二句"]) == "第一句。第二句"
+        assert _splice_texts(["第一句", "，第二句"]) == "第一句，第二句"
+
+    def test_code_switch_joins_get_no_comma(self) -> None:
+        assert _splice_texts(["帮我", "review这个PR"]) == "帮我review这个PR"
+        assert _splice_texts(["check latency", "然后发给我"]) == "check latency然后发给我"

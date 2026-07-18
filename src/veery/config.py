@@ -86,6 +86,11 @@ class StreamingConfig:
     # How long the release path waits for in-flight segment decodes; audio
     # not committed by then is simply covered by the tail transcription.
     drain_timeout_sec: float = 3.0
+    # Tail of already-committed text passed as context to the next segment's
+    # decode (fixes cold-start misrecognition and punctuation continuity at
+    # segment starts). 0 disables. Kept small: long rolling prompts are a
+    # known hallucination-loop trigger on accented speech.
+    rolling_prompt_chars: int = 120
 
 
 @dataclass(frozen=True)
@@ -365,6 +370,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         )
         if changed:
             streaming_kwargs["overlap_ms"] = int(overlap)
+            rebuild_streaming = True
+        rolling, changed = _validate_numeric(
+            streaming_kwargs["rolling_prompt_chars"], name="streaming.rolling_prompt_chars",
+            default=120, low=0, integer=True,
+        )
+        if changed:
+            streaming_kwargs["rolling_prompt_chars"] = int(rolling)
             rebuild_streaming = True
         if streaming_kwargs["max_segment_sec"] <= streaming_kwargs["min_segment_sec"]:
             logger.warning(
