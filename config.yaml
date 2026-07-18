@@ -36,9 +36,9 @@ audio:
 
 streaming:
   enabled: true                   # Transcribe segments during pauses while you hold the key
-#   finalize_pause_sec: 0.7       # Mid-clip pause that cuts a segment (recording still ends at vad.silence_duration_sec)
+#   finalize_pause_sec: 1.0       # Mid-clip pause that cuts a segment (recording still ends at vad.silence_duration_sec)
 #   min_segment_sec: 1.0          # Don't cut segments with less speech than this
 #   max_segment_sec: 18.0         # Force-cut monologues without pauses
 #   overlap_ms: 200               # Audio prepended across cuts so words aren't clipped
 #   drain_timeout_sec: 3.0         # Max wait for in-flight segments at key release
-#   rolling_prompt_chars: 120     # Committed-text tail fed to next segment for context (0 disables)
+#   rolling_prompt_chars: 0       # Context conditioning: OFF by default (degraded accuracy on accented speech)

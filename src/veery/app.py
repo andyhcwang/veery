@@ -241,9 +241,17 @@ class _StreamingSession:
                 if text and _is_repetitive_hallucination(text):
                     logger.warning("Streaming segment %d looks hallucinated, dropping text", seq)
                     text = ""
-                if text and seq > 0 and self._same_as_previous(seq, text):
+                if (
+                    text
+                    and seq > 0
+                    and self._rolling_prompt_chars > 0
+                    and self._same_as_previous(seq, text)
+                ):
                     # Rolling-prompt echo guard: a segment decoding to exactly
                     # the previous segment's text is a conditioning artifact.
+                    # Only armed while rolling conditioning is on — without it
+                    # an identical segment is a LEGITIMATE repeat (e.g. the
+                    # user re-dictating) and must never be dropped.
                     logger.warning("Streaming segment %d repeats segment %d, dropping", seq, seq - 1)
                     text = ""
                 logger.info(
@@ -1980,7 +1988,27 @@ def main() -> None:
                         help="Output path for mined jargon YAML (default: jargon/mined.yaml)")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        # Under LaunchServices stderr goes nowhere — keep a rotating file log
+        # so per-segment transcripts and latency lines are always inspectable
+        # (~/Library/Logs/Veery/veery.log, also visible in Console.app).
+        from logging.handlers import RotatingFileHandler
+
+        log_dir = Path.home() / "Library" / "Logs" / "Veery"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            RotatingFileHandler(
+                log_dir / "veery.log", maxBytes=2_000_000, backupCount=2, encoding="utf-8"
+            )
+        )
+    except Exception:
+        pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=handlers,
+    )
 
     if args.mine:
         from veery.miner import (

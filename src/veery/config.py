@@ -74,8 +74,11 @@ class StreamingConfig:
 
     enabled: bool = False
     # Mid-clip finalize pause — deliberately shorter than the recording-end
-    # vad.silence_duration_sec (2.0s), which stays untouched.
-    finalize_pause_sec: float = 0.7
+    # vad.silence_duration_sec (2.0s), which stays untouched. 1.0s (up from
+    # the initial 0.7) cuts only at real clause breaks: hesitation pauses in
+    # accented speech were producing mid-clause cuts (worse per-segment
+    # context, spurious join commas).
+    finalize_pause_sec: float = 1.0
     # Whisper accuracy degrades badly below ~1s; shorter runs of speech keep
     # accumulating into the next segment instead of being cut.
     min_segment_sec: float = 1.0
@@ -87,10 +90,10 @@ class StreamingConfig:
     # not committed by then is simply covered by the tail transcription.
     drain_timeout_sec: float = 3.0
     # Tail of already-committed text passed as context to the next segment's
-    # decode (fixes cold-start misrecognition and punctuation continuity at
-    # segment starts). 0 disables. Kept small: long rolling prompts are a
-    # known hallucination-loop trigger on accented speech.
-    rolling_prompt_chars: int = 120
+    # decode. DEFAULT OFF (0): real-world accented usage confirmed the
+    # design caveat — prompt conditioning degrades accuracy and can trigger
+    # echo artifacts. Opt in with e.g. 120 if your speech decodes cleanly.
+    rolling_prompt_chars: int = 0
 
 
 @dataclass(frozen=True)
@@ -373,7 +376,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             rebuild_streaming = True
         rolling, changed = _validate_numeric(
             streaming_kwargs["rolling_prompt_chars"], name="streaming.rolling_prompt_chars",
-            default=120, low=0, integer=True,
+            default=0, low=0, integer=True,
         )
         if changed:
             streaming_kwargs["rolling_prompt_chars"] = int(rolling)

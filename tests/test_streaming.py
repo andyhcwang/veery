@@ -36,7 +36,7 @@ def _drive(rec: AudioRecorder, prob: float, n: int) -> None:
 STREAM_CFG = StreamingConfig(enabled=True)
 
 # Chunk counts at 32ms/chunk for the default config
-PAUSE_CHUNKS = int(0.7 * 1000 / 32)  # 21
+PAUSE_CHUNKS = int(1.0 * 1000 / 32)  # 31
 MIN_SPEECH_CHUNKS = int(1.0 * 1000 / 32)  # 31
 OVERLAP_CHUNKS = int(200 / 32)  # 6
 
@@ -296,3 +296,16 @@ class TestSpliceJoinPunctuation:
     def test_code_switch_joins_get_no_comma(self) -> None:
         assert _splice_texts(["帮我", "review这个PR"]) == "帮我review这个PR"
         assert _splice_texts(["check latency", "然后发给我"]) == "check latency然后发给我"
+
+
+    def test_echo_guard_inactive_without_rolling_prompt(self) -> None:
+        """Without rolling conditioning, identical repeats are LEGITIMATE."""
+        stt = MagicMock()
+        stt.transcribe.side_effect = lambda a, sr, context_prompt=None: "重要的事情说两遍"
+        session = _StreamingSession(stt, 16000, rolling_prompt_chars=0)
+        session.enqueue(0, [np.zeros(512, dtype=np.float32)], 10)
+        session.enqueue(1, [np.zeros(512, dtype=np.float32)], 20)
+        assert session.drain(5.0)
+        parts, end = session.committed()
+        assert parts == ["重要的事情说两遍", "重要的事情说两遍"]
+        assert end == 20
