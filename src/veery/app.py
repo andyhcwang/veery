@@ -121,6 +121,119 @@ class State(enum.Enum):
     PROCESSING = "processing"
 
 
+def _is_cjk_char(ch: str) -> bool:
+    return (
+        "　" <= ch <= "〿"  # CJK punctuation
+        or "一" <= ch <= "鿿"  # CJK unified ideographs
+        or "＀" <= ch <= "￯"  # fullwidth forms
+    )
+
+
+# Never put a space BEFORE these when splicing English fragments.
+_NO_SPACE_BEFORE = set(".,;:!?)]}%'\"…")
+
+
+def _splice_texts(parts: list[str]) -> str:
+    """Join per-segment transcripts into one text.
+
+    Whisper emits clean per-segment text; the join rule is: no space at CJK
+    boundaries or before punctuation, a single space between Latin words.
+    This yields correct spacing for Chinese/English code-switched output.
+    """
+    out = ""
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if not out:
+            out = part
+            continue
+        prev, nxt = out[-1], part[0]
+        if _is_cjk_char(prev) or _is_cjk_char(nxt) or nxt in _NO_SPACE_BEFORE:
+            out += part
+        else:
+            out += " " + part
+    return out
+
+
+class _StreamingSession:
+    """Serialized background transcription of streaming segments.
+
+    A single worker preserves segment order and avoids concurrent
+    mlx-whisper decodes (Metal inference is not safely reentrant). Results
+    are keyed by seq; the committed prefix is the longest run of
+    consecutive successes from seq 0 — audio after it (including any
+    failed or still-running segment) is re-covered by the release tail.
+    """
+
+    def __init__(self, stt, sample_rate: int) -> None:
+        import queue
+
+        self._stt = stt
+        self._sample_rate = sample_rate
+        self._queue: object = queue.SimpleQueue()
+        self._results: dict[int, tuple[str | None, int]] = {}
+        self._lock = threading.Lock()
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
+
+    def enqueue(self, seq: int, chunks: list, end_chunk: int) -> None:
+        """Segment sink, called from the RT audio thread — enqueue only."""
+        self._queue.put((seq, chunks, end_chunk))
+
+    def close(self) -> None:
+        self._queue.put(None)
+
+    def drain(self, timeout: float) -> bool:
+        """Close the queue and wait for queued segments to finish."""
+        self.close()
+        self._worker.join(timeout)
+        return not self._worker.is_alive()
+
+    def committed(self) -> tuple[list[str], int]:
+        """Longest consecutive successful prefix: (texts, end_chunk)."""
+        with self._lock:
+            results = dict(self._results)
+        parts: list[str] = []
+        end_chunk = 0
+        seq = 0
+        while seq in results:
+            text, chunk = results[seq]
+            if text is None:
+                break  # failed segment: tail re-covers from here
+            parts.append(text)
+            end_chunk = chunk
+            seq += 1
+        return parts, end_chunk
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            seq, chunks, end_chunk = item
+            text: str | None
+            try:
+                audio = np.concatenate(chunks)
+                t0 = time.monotonic()
+                text = self._stt.transcribe(audio, self._sample_rate)
+                if text and _is_repetitive_hallucination(text):
+                    logger.warning("Streaming segment %d looks hallucinated, dropping text", seq)
+                    text = ""
+                logger.info(
+                    "Streaming segment %d: %.1fs audio -> %d chars in %dms",
+                    seq,
+                    len(audio) / self._sample_rate,
+                    len(text),
+                    int((time.monotonic() - t0) * 1000),
+                )
+            except Exception:
+                logger.exception("Streaming segment %d failed; tail will re-cover it", seq)
+                text = None
+            with self._lock:
+                self._results[seq] = (text, end_chunk)
+
+
 class VeeryApp(rumps.App):
     """macOS menubar app for bilingual dictation with jargon correction."""
 
@@ -222,6 +335,7 @@ class VeeryApp(rumps.App):
         self._cancelled_processing_generation = -1  # no generation cancelled yet
         self._processing_lock = threading.Lock()
         self._accessibility_ok_until = 0.0  # monotonic deadline of cached OK check
+        self._streaming_session: _StreamingSession | None = None
 
         # Signals that all models are loaded and app is ready
         self._ready = threading.Event()
@@ -247,7 +361,10 @@ class VeeryApp(rumps.App):
         # 1. Audio recorder (VAD loaded eagerly in _load_models)
         try:
             self._recorder = AudioRecorder(self._config.audio, self._config.vad)
-            logger.info("AudioRecorder initialized")
+            self._recorder.configure_streaming(self._config.streaming)
+            logger.info(
+                "AudioRecorder initialized (streaming=%s)", self._config.streaming.enabled
+            )
         except Exception:
             logger.exception("Failed to initialize AudioRecorder")
 
@@ -1053,11 +1170,28 @@ class VeeryApp(rumps.App):
         _run_on_main_thread(_ui)
         sounds.play_start()
 
+        # Streaming: register the segment sink BEFORE the stream opens so no
+        # finalize event can be missed. Any failure falls back to batch mode.
+        self._streaming_session = None
+        if (
+            self._config.streaming.enabled
+            and self._recorder is not None
+            and self._stt is not None
+        ):
+            try:
+                session = _StreamingSession(self._stt, self._config.audio.sample_rate)
+                self._recorder.set_finalize_callback(session.enqueue)
+                self._streaming_session = session
+            except Exception:
+                logger.exception("Failed to start streaming session; using batch mode")
+                self._cleanup_streaming_session()
+
         if self._recorder is not None:
             try:
                 self._recorder.prepare_stream(manual_mode=True)
             except Exception:
                 logger.exception("Failed to prepare audio stream")
+                self._cleanup_streaming_session()
                 self._recording_started.set()  # unblock any waiting _on_key_up
                 self._set_state(State.IDLE)
                 return
@@ -1076,6 +1210,21 @@ class VeeryApp(rumps.App):
         elif current == State.RECORDING:
             self._stop_recording()
 
+    def _cleanup_streaming_session(self) -> None:
+        """Discard the active streaming session and detach its recorder sink."""
+        session = self._streaming_session
+        self._streaming_session = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                logger.debug("Could not close streaming session", exc_info=True)
+        if self._recorder is not None:
+            try:
+                self._recorder.set_finalize_callback(None)
+            except Exception:
+                logger.debug("Could not clear finalize callback", exc_info=True)
+
     def _is_active_recording_session(self, session_id: int | None) -> bool:
         """Return True if a background helper still belongs to the current recording."""
         with self._state_lock:
@@ -1091,6 +1240,7 @@ class VeeryApp(rumps.App):
             if self._is_active_recording_session(session_id):
                 self._notify("Veery", "Error", "Audio recorder not available")
                 self._recording_started.set()
+                self._cleanup_streaming_session()
                 self._overlay.show_warning("Recorder unavailable")
                 self._set_state(State.IDLE, skip_overlay=True)
             return
@@ -1108,6 +1258,7 @@ class VeeryApp(rumps.App):
             logger.exception("Failed to start recording")
             self._recording_started.set()  # Unblock key_up even on failure
             self._notify("Veery", "Error", str(e))
+            self._cleanup_streaming_session()
             self._overlay.show_warning("Recording failed")
             self._set_state(State.IDLE, skip_overlay=True)
 
@@ -1144,6 +1295,32 @@ class VeeryApp(rumps.App):
             stop_message = "Max dictation length reached"
             self._notify("Veery", "Recording stopped", stop_message)
 
+        # Streaming release path: capture stops now, but segment drain + tail
+        # building happen on the worker so the hotkey thread stays fast.
+        session = self._streaming_session
+        self._streaming_session = None
+        if session is not None:
+            try:
+                self._recorder.stop_capture(reason=reason)
+            except Exception:
+                logger.exception("Failed to stop capture cleanly")
+                session.close()
+                self._overlay.show_warning("Recording failed")
+                self._set_state(State.IDLE, skip_overlay=True)
+                return
+            self._set_state(State.PROCESSING)
+            with self._processing_lock:
+                self._processing_generation += 1
+                generation = self._processing_generation
+            worker = threading.Thread(
+                target=self._process_streaming_release, args=(session, generation), daemon=True
+            )
+            worker.start()
+            threading.Thread(
+                target=self._watch_processing, args=(worker, generation), daemon=True
+            ).start()
+            return
+
         try:
             segment = self._recorder.stop_and_flush(reason=reason)
         except Exception:
@@ -1170,6 +1347,28 @@ class VeeryApp(rumps.App):
         threading.Thread(
             target=self._watch_processing, args=(worker, generation), daemon=True
         ).start()
+
+    def _process_streaming_release(self, session: _StreamingSession, generation: int) -> None:
+        """Streaming release: drain committed segments, transcribe only the tail."""
+        drained = session.drain(self._config.streaming.drain_timeout_sec)
+        if not drained:
+            logger.warning(
+                "Streaming worker still busy after %.1fs; tail will cover uncommitted audio",
+                self._config.streaming.drain_timeout_sec,
+            )
+        parts, committed_end = session.committed()
+        tail: AudioSegment | None = None
+        if self._recorder is not None:
+            try:
+                tail = self._recorder.build_tail(committed_end)
+            except Exception:
+                logger.exception("Failed to build streaming tail")
+        logger.info(
+            "Streaming release: %d committed segment(s), tail=%s",
+            len(parts),
+            f"{tail.duration_sec:.2f}s" if tail is not None else "none",
+        )
+        self._process_segment(tail, generation, committed_parts=parts)
 
     def _watch_processing(self, worker: threading.Thread, generation: int) -> None:
         """Watchdog: if processing hangs (STT stall), return the app to IDLE.
@@ -1234,8 +1433,18 @@ class VeeryApp(rumps.App):
         self._cleanup_pending_stt_async()
         return True
 
-    def _process_segment(self, segment: AudioSegment, generation: int = 0) -> None:
+    def _process_segment(
+        self,
+        segment: AudioSegment | None,
+        generation: int = 0,
+        committed_parts: list[str] | None = None,
+    ) -> None:
         """Process a captured audio segment: STT -> correct -> paste.
+
+        In streaming mode, ``segment`` is only the residual tail and
+        ``committed_parts`` carries the already-transcribed segments; the
+        tail may legitimately be None/empty then. In batch mode the segment
+        is the whole clip and committed_parts is empty.
 
         Note: state is already PROCESSING (set by _stop_recording before
         spawning this thread) to avoid a race window where rapid hotkey
@@ -1243,6 +1452,8 @@ class VeeryApp(rumps.App):
         """
         success = False
         warned = False
+        committed = [p.strip() for p in (committed_parts or []) if p and p.strip()]
+        has_committed = bool(committed)
 
         def _warn(message: str) -> None:
             nonlocal warned
@@ -1252,61 +1463,87 @@ class VeeryApp(rumps.App):
         timings: dict[str, float] = {}
         t_start = time.monotonic()
         try:
-            vad_says_speech: bool | None = None
-            if getattr(segment, "vad_confirmed", False):
-                # Recording-time VAD already confirmed speech — re-scanning the
-                # whole segment would add up to ~1s of latency for nothing.
-                vad_says_speech = True
-            elif self._recorder is not None:
-                try:
-                    vad_says_speech = self._recorder.has_speech(segment.audio)
-                except Exception:
-                    logger.exception("Segment VAD speech check failed; continuing to STT")
-            timings["vad"] = time.monotonic() - t_start
-            if vad_says_speech is False:
-                logger.info(
-                    "Skipping STT: segment failed VAD speech check (duration=%.2fs).",
-                    segment.duration_sec,
-                )
-                _warn("No speech detected")
-                return
+            tail_text = ""
+            if segment is None:
+                if not has_committed:
+                    _warn("No speech detected")
+                    return
+            else:
+                vad_says_speech: bool | None = None
+                if getattr(segment, "vad_confirmed", False):
+                    # Recording-time VAD already confirmed speech; re-scanning
+                    # the whole segment would add ~1s of latency for nothing.
+                    vad_says_speech = True
+                elif self._recorder is not None:
+                    try:
+                        vad_says_speech = self._recorder.has_speech(segment.audio)
+                    except Exception:
+                        logger.exception("Segment VAD speech check failed; continuing to STT")
+                timings["vad"] = time.monotonic() - t_start
 
-            # Guard against "press/release with no speech" short noise clips.
-            # Only applied when the VAD check could not run \u2014 when VAD already
-            # confirmed speech, a low RMS just means a quiet mic, not silence.
-            if vad_says_speech is None and segment.duration_sec < 1.0:
-                rms = float(np.sqrt(np.mean(segment.audio**2)))
-                if rms < 0.02:
+                gate_failed = False
+                if vad_says_speech is False:
                     logger.info(
-                        "Skipping STT for short low-energy segment (duration=%.2fs, rms=%.4f).",
+                        "Skipping STT: segment failed VAD speech check (duration=%.2fs).",
                         segment.duration_sec,
-                        rms,
                     )
+                    gate_failed = True
+                # Guard against "press/release with no speech" short noise
+                # clips. Only applied when the VAD check could not run; when
+                # VAD already confirmed speech, a low RMS just means a quiet
+                # mic, not silence.
+                elif vad_says_speech is None and segment.duration_sec < 1.0:
+                    rms = float(np.sqrt(np.mean(segment.audio**2)))
+                    if rms < 0.02:
+                        logger.info(
+                            "Skipping STT for short low-energy segment (duration=%.2fs, rms=%.4f).",
+                            segment.duration_sec,
+                            rms,
+                        )
+                        gate_failed = True
+                if gate_failed and not has_committed:
                     _warn("No speech detected")
                     return
 
-            stt = self._stt
-            if stt is None:
-                self._notify("Veery", "Error", "STT model not available")
-                _warn("STT not ready")
-                return
-
-            t_stt = time.monotonic()
-            raw_text = stt.transcribe(segment.audio, segment.sample_rate)
-            timings["stt"] = time.monotonic() - t_stt
+                if not gate_failed:
+                    stt = self._stt
+                    if stt is None:
+                        if not has_committed:
+                            self._notify("Veery", "Error", "STT model not available")
+                            _warn("STT not ready")
+                            return
+                    else:
+                        t_stt = time.monotonic()
+                        try:
+                            tail_text = stt.transcribe(segment.audio, segment.sample_rate)
+                        except STTError as e:
+                            if not has_committed:
+                                raise
+                            # Never lose committed text over a tail failure.
+                            logger.error(
+                                "Tail transcription failed (%s); pasting committed text only", e
+                            )
+                            self._notify(
+                                "Veery", "Partial transcription", "Last segment failed; see log."
+                            )
+                            tail_text = ""
+                        timings["stt"] = time.monotonic() - t_stt
 
             if self._is_processing_cancelled(generation):
                 logger.warning("Discarding result of cancelled processing generation %d", generation)
                 warned = True  # watchdog already showed a warning; don't clobber it
                 return
 
+            if tail_text and _is_repetitive_hallucination(tail_text):
+                logger.warning("Hallucination detected, discarding: %.80s...", tail_text)
+                if not has_committed:
+                    _warn("Filtered repetitive audio")
+                    return
+                tail_text = ""
+
+            raw_text = _splice_texts([*committed, tail_text])
             if not raw_text:
                 _warn("No speech detected")
-                return
-
-            if _is_repetitive_hallucination(raw_text):
-                logger.warning("Hallucination detected, discarding: %.80s...", raw_text)
-                _warn("Filtered repetitive audio")
                 return
 
             logger.info("Transcribed: %s", raw_text)
@@ -1354,7 +1591,7 @@ class VeeryApp(rumps.App):
                 int(timings.get("stt", 0) * 1000),
                 int(timings.get("paste", 0) * 1000),
                 int((time.monotonic() - t_start) * 1000),
-                segment.duration_sec,
+                segment.duration_sec if segment is not None else 0.0,
             )
             # Learning runs AFTER the paste: a learning failure must never
             # cost the user their dictated text.
@@ -1644,6 +1881,7 @@ class VeeryApp(rumps.App):
 
     def _on_quit(self, _sender) -> None:
         """Clean shutdown."""
+        self._cleanup_streaming_session()
         self._finalize_manual_edit_learning()
         self._discard_manual_edit_monitor()
         if self._usage_tracker is not None:

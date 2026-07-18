@@ -1262,3 +1262,113 @@ class TestSTTBackendSwitch:
         assert app._stt is old_stt
         assert app._stt_switching is False
         assert "switch failed" in app._detail_item.title.lower()
+
+
+from veery.app import State  # noqa: E402  (appended test section)
+
+
+class TestStreamingReleasePath:
+    """Streaming-mode _stop_recording / _process_streaming_release flow."""
+
+    def test_stop_recording_uses_streaming_branch(self, app) -> None:
+        app._state = State.RECORDING
+        session = MagicMock()
+        app._streaming_session = session
+        with patch("veery.app.threading.Thread") as thread:
+            app._stop_recording()
+        app._recorder.stop_capture.assert_called_once()
+        assert app._streaming_session is None
+        targets = [c.kwargs.get("target") for c in thread.call_args_list]
+        assert app._process_streaming_release in targets
+        assert app._watch_processing in targets
+        assert app._state == State.PROCESSING
+
+    def test_streaming_release_splices_committed_and_pastes(self, app) -> None:
+        app._state = State.PROCESSING
+        app._corrector = None
+        session = MagicMock()
+        session.drain.return_value = True
+        session.committed.return_value = (["hello world", "第二段"], 42)
+        app._recorder.build_tail.return_value = None
+        with patch("veery.app.paste_to_active_app") as paste:
+            app._process_streaming_release(session, 1)
+        app._recorder.build_tail.assert_called_once_with(42)
+        paste.assert_called_once()
+        assert paste.call_args.args[0] == "hello world第二段"
+        assert app._state == State.IDLE
+
+    def test_streaming_release_appends_tail_text(self, app) -> None:
+        app._state = State.PROCESSING
+        app._corrector = None
+        session = MagicMock()
+        session.drain.return_value = True
+        session.committed.return_value = (["first part"], 10)
+        tail = FakeSegment(
+            audio=np.full(16000, 0.1, dtype=np.float32), sample_rate=16000, duration_sec=1.0
+        )
+        app._recorder.build_tail.return_value = tail
+        app._stt.transcribe.return_value = "and the tail"
+        with patch("veery.app.paste_to_active_app") as paste:
+            app._process_streaming_release(session, 1)
+        assert paste.call_args.args[0] == "first part and the tail"
+        assert app._state == State.IDLE
+
+    def test_tail_stt_error_still_pastes_committed(self, app) -> None:
+        app._state = State.PROCESSING
+        app._corrector = None
+        session = MagicMock()
+        session.drain.return_value = True
+        session.committed.return_value = (["only part"], 7)
+        tail = FakeSegment(
+            audio=np.full(16000, 0.1, dtype=np.float32), sample_rate=16000, duration_sec=2.0
+        )
+        app._recorder.build_tail.return_value = tail
+        from veery.stt import STTError
+
+        app._stt.transcribe.side_effect = STTError("backend died")
+        with patch("veery.app.paste_to_active_app") as paste:
+            app._process_streaming_release(session, 1)
+        assert paste.call_args.args[0] == "only part"
+        assert app._state == State.IDLE
+
+    def test_drain_timeout_still_pastes_committed(self, app) -> None:
+        app._state = State.PROCESSING
+        app._corrector = None
+        session = MagicMock()
+        session.drain.return_value = False  # worker hung
+        session.committed.return_value = (["committed before hang"], 5)
+        app._recorder.build_tail.return_value = None
+        with patch("veery.app.paste_to_active_app") as paste:
+            app._process_streaming_release(session, 1)
+        assert paste.call_args.args[0] == "committed before hang"
+
+    def test_no_committed_no_tail_warns_no_speech(self, app) -> None:
+        app._state = State.PROCESSING
+        session = MagicMock()
+        session.drain.return_value = True
+        session.committed.return_value = ([], 0)
+        app._recorder.build_tail.return_value = None
+        with patch("veery.app.paste_to_active_app") as paste:
+            app._process_streaming_release(session, 1)
+        assert not paste.called
+        app._overlay.show_warning.assert_called_with("No speech detected")
+        assert app._state == State.IDLE
+
+    def test_begin_recording_creates_session_when_enabled(self, app) -> None:
+        from dataclasses import replace as dc_replace
+
+        from veery.app import _StreamingSession
+        from veery.config import StreamingConfig
+
+        app._config = dc_replace(app._config, streaming=StreamingConfig(enabled=True))
+        app._state = State.IDLE
+        app._begin_recording()
+        assert isinstance(app._streaming_session, _StreamingSession)
+        app._recorder.set_finalize_callback.assert_called_with(
+            app._streaming_session.enqueue
+        )
+
+    def test_begin_recording_no_session_when_disabled(self, app) -> None:
+        app._state = State.IDLE
+        app._begin_recording()
+        assert app._streaming_session is None

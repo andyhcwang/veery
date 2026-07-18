@@ -9,16 +9,18 @@ A state machine tracks speech onset and offset to produce complete utterances.
 from __future__ import annotations
 
 import enum
+import itertools
 import logging
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 import sounddevice as sd
 import torch
 
-from veery.config import AudioConfig, VADConfig
+from veery.config import AudioConfig, StreamingConfig, VADConfig
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,20 @@ class AudioRecorder:
         self._rechunk_buf = np.zeros(self._audio_cfg.chunk_samples, dtype=np.float32)
         self._rechunk_pos = 0
 
+        # Streaming finalize state (see design/streaming-dictation.md).
+        # Segments are cut at short VAD pauses and handed to the callback so
+        # they can be transcribed while capture continues. All counters are in
+        # VAD-chunk units and protected by self._lock.
+        self._streaming_cfg: StreamingConfig | None = None
+        self._finalize_cb: Callable[[int, list[np.ndarray], int], None] | None = None
+        self._finalized_chunks = 0  # index into _buffer past the last cut
+        self._segment_seq = 0
+        self._speech_chunks_since_cut = 0
+        self._finalize_pause_chunks = 0
+        self._min_segment_speech_chunks = 0
+        self._max_segment_chunks = 0
+        self._overlap_chunks = 0
+
         # sounddevice stream (created per-recording)
         self._stream: sd.InputStream | None = None
         self._min_speech_frames = 3  # guard against single-frame VAD spikes (keyboard/noise)
@@ -154,6 +170,29 @@ class AudioRecorder:
     # Public API
     # ------------------------------------------------------------------
 
+    def configure_streaming(self, cfg: StreamingConfig | None) -> None:
+        """Set streaming segmentation thresholds (chunk units). None disables."""
+        with self._lock:
+            self._streaming_cfg = cfg if (cfg is not None and cfg.enabled) else None
+            if self._streaming_cfg is None:
+                return
+            ms = self._audio_cfg.chunk_duration_ms
+            self._finalize_pause_chunks = max(1, int(cfg.finalize_pause_sec * 1000 / ms))
+            self._min_segment_speech_chunks = max(1, int(cfg.min_segment_sec * 1000 / ms))
+            self._max_segment_chunks = max(2, int(cfg.max_segment_sec * 1000 / ms))
+            self._overlap_chunks = max(0, int(cfg.overlap_ms / ms))
+
+    def set_finalize_callback(
+        self, callback: Callable[[int, list[np.ndarray], int], None] | None
+    ) -> None:
+        """Register the per-recording segment sink: callback(seq, chunks, end_chunk).
+
+        Called from the real-time audio thread — the callback must only
+        enqueue (no allocation-heavy work, no blocking).
+        """
+        with self._lock:
+            self._finalize_cb = callback
+
     def prepare_stream(self, *, manual_mode: bool = False) -> None:
         """Open and start the audio stream immediately (call from hotkey thread).
 
@@ -185,6 +224,9 @@ class AudioRecorder:
             self._stop_reason = None
             self._capture_mode = _CaptureMode.MANUAL if manual_mode else _CaptureMode.WAIT
             self._captured_samples = 0
+            self._finalized_chunks = 0
+            self._segment_seq = 0
+            self._speech_chunks_since_cut = 0
 
             manual_max_duration = self._audio_cfg.manual_max_duration_sec
             if manual_mode and manual_max_duration is not None:
@@ -262,6 +304,58 @@ class AudioRecorder:
         self._done_event.set()
         self._manual_stop_event.set()
         return self._build_segment(use_raw=True)
+
+    def stop_capture(self, *, reason: StopReason = StopReason.USER_STOP) -> None:
+        """Stop capturing without building a segment (streaming release path).
+
+        Detaches the stream (closed on a background thread), clears the
+        finalize callback so no further segments are emitted, and signals
+        waiters. Buffers stay intact for build_tail().
+        """
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            threading.Thread(
+                target=self._close_detached_stream, args=(stream,), daemon=True
+            ).start()
+        with self._lock:
+            self._finalize_cb = None
+        self._set_stop_reason(reason)
+        self._done_event.set()
+        self._manual_stop_event.set()
+
+    def build_tail(self, from_chunk: int) -> AudioSegment | None:
+        """Build the residual segment after the last committed streaming cut.
+
+        With from_chunk <= 0 (nothing committed) this is exactly the batch
+        path — full segment with raw-audio fallback. Otherwise the tail is
+        _buffer[from_chunk - overlap:], with trailing silence stripped.
+        """
+        if from_chunk <= 0:
+            return self._build_segment(use_raw=True)
+
+        with self._lock:
+            start = max(0, from_chunk - self._overlap_chunks)
+            chunks = list(itertools.islice(self._buffer, start, None))
+            if not chunks:
+                return None
+            audio = np.concatenate(chunks)
+            silence_samples = int(self._silence_frames * self._audio_cfg.chunk_samples)
+            if 0 < silence_samples < len(audio):
+                audio = audio[:-silence_samples]
+            duration_sec = len(audio) / self._audio_cfg.sample_rate
+            if duration_sec < 0.25:
+                return None
+            has_new_speech = self._speech_chunks_since_cut >= 3
+            logger.info(
+                "Built streaming tail: %.2fs (new speech: %s).", duration_sec, has_new_speech
+            )
+            return AudioSegment(
+                audio=audio,
+                sample_rate=self._audio_cfg.sample_rate,
+                duration_sec=duration_sec,
+                vad_confirmed=has_new_speech,
+            )
 
     @staticmethod
     def _close_detached_stream(stream: sd.InputStream) -> None:
@@ -460,6 +554,7 @@ class AudioRecorder:
                     self._silence_frames = 0
                     self._state = _State.SPEECH_DETECTED
                     self._speech_frames += 1
+                    self._speech_chunks_since_cut += 1
                     self._done_event.clear()
                 return
 
@@ -473,11 +568,21 @@ class AudioRecorder:
                     self._pre_speech_buffer.clear()
                     self._state = _State.SPEECH_DETECTED
                     self._speech_frames = 1
+                    self._speech_chunks_since_cut += 1
 
             elif self._state == _State.SPEECH_DETECTED:
                 self._buffer.append(chunk)
                 if is_speech:
                     self._speech_frames += 1
+                    self._speech_chunks_since_cut += 1
+                    # Force-cut a no-pause monologue so segments stay short
+                    # enough to decode well (and start decoding early).
+                    if (
+                        self._streaming_active_locked()
+                        and len(self._buffer) - self._finalized_chunks >= self._max_segment_chunks
+                        and self._speech_chunks_since_cut >= self._min_segment_speech_chunks
+                    ):
+                        self._emit_segment_locked()
                 else:
                     self._silence_frames = 1
                     self._state = _State.SILENCE_COUNTING
@@ -489,12 +594,52 @@ class AudioRecorder:
                     self._silence_frames = 0
                     self._state = _State.SPEECH_DETECTED
                     self._speech_frames += 1
+                    self._speech_chunks_since_cut += 1
                 else:
                     self._silence_frames += 1
+                    # Mid-clip streaming cut: a short pause (well before the
+                    # recording-end threshold) finalizes the current segment
+                    # for background transcription. Equality fires exactly
+                    # once per silence run.
+                    if (
+                        self._streaming_active_locked()
+                        and self._silence_frames == self._finalize_pause_chunks
+                        and self._speech_chunks_since_cut >= self._min_segment_speech_chunks
+                    ):
+                        self._emit_segment_locked()
                     silence_sec = self._silence_frames * self._audio_cfg.chunk_duration_ms / 1000
                     if silence_sec >= self._vad_cfg.silence_duration_sec:
                         self._state = _State.DONE
                         self._done_event.set()
+
+    def _streaming_active_locked(self) -> bool:
+        return (
+            self._streaming_cfg is not None
+            and self._finalize_cb is not None
+            and self._capture_mode == _CaptureMode.MANUAL
+        )
+
+    def _emit_segment_locked(self) -> None:
+        """Finalize _buffer[cursor:] as a segment and advance the cursor.
+
+        Runs on the RT audio thread under self._lock: only pointer copies
+        (no audio concatenation) and a queue put in the callback — and it
+        must never raise into the audio callback.
+        """
+        cb = self._finalize_cb
+        end = len(self._buffer)
+        if cb is None or end <= self._finalized_chunks:
+            return
+        start = max(0, self._finalized_chunks - self._overlap_chunks)
+        chunks = list(itertools.islice(self._buffer, start, end))
+        self._finalized_chunks = end
+        self._speech_chunks_since_cut = 0
+        seq = self._segment_seq
+        self._segment_seq += 1
+        try:
+            cb(seq, chunks, end)
+        except Exception:
+            pass  # RT thread: no logging, no raising
 
     # ------------------------------------------------------------------
     # Internal helpers

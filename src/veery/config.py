@@ -64,6 +64,31 @@ STT_BACKENDS: tuple[tuple[str, str], ...] = (
 
 
 @dataclass(frozen=True)
+class StreamingConfig:
+    """Incremental transcription during hold-to-talk capture.
+
+    Segments are cut at short VAD pauses and transcribed in the background
+    while recording continues, so on key release only the residual tail
+    needs decoding (whisper.cpp-stream / WhisperLive architecture).
+    """
+
+    enabled: bool = False
+    # Mid-clip finalize pause — deliberately shorter than the recording-end
+    # vad.silence_duration_sec (2.0s), which stays untouched.
+    finalize_pause_sec: float = 0.7
+    # Whisper accuracy degrades badly below ~1s; shorter runs of speech keep
+    # accumulating into the next segment instead of being cut.
+    min_segment_sec: float = 1.0
+    # Force-cut a no-pause monologue so segments stay well-conditioned.
+    max_segment_sec: float = 18.0
+    # Audio prepended from before the cut so a straddling word isn't clipped.
+    overlap_ms: int = 200
+    # How long the release path waits for in-flight segment decodes; audio
+    # not committed by then is simply covered by the tail transcription.
+    drain_timeout_sec: float = 3.0
+
+
+@dataclass(frozen=True)
 class JargonConfig:
     dict_paths: tuple[str, ...] = (
         "jargon/quant_finance.yaml",
@@ -104,6 +129,7 @@ class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     vad: VADConfig = field(default_factory=VADConfig)
     stt: STTConfig = field(default_factory=STTConfig)
+    streaming: StreamingConfig = field(default_factory=StreamingConfig)
     jargon: JargonConfig = field(default_factory=JargonConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -189,6 +215,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             audio=AudioConfig(**audio_raw),
             vad=VADConfig(**_filter_keys(VADConfig, raw.get("vad", {}))),
             stt=STTConfig(**_filter_keys(STTConfig, raw.get("stt", {}))),
+            streaming=StreamingConfig(**_filter_keys(StreamingConfig, raw.get("streaming", {}))),
             jargon=JargonConfig(**jargon_raw),
             hotkey=HotkeyConfig(**_filter_keys(HotkeyConfig, raw.get("hotkey", {}))),
             output=OutputConfig(**_filter_keys(OutputConfig, raw.get("output", {}))),
@@ -309,6 +336,53 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             rebuild_hotkey = True
         hotkey_cfg = HotkeyConfig(**hotkey_kwargs) if rebuild_hotkey else cfg.hotkey
 
+        # Validate streaming config.
+        streaming_kwargs = dict(vars(cfg.streaming))
+        rebuild_streaming = False
+        if not isinstance(cfg.streaming.enabled, bool):
+            logger.warning(
+                "streaming.enabled must be a boolean (got %r), resetting to False",
+                cfg.streaming.enabled,
+            )
+            streaming_kwargs["enabled"] = False
+            rebuild_streaming = True
+        for field_name, default, low in (
+            ("finalize_pause_sec", 0.7, 0.0),
+            ("min_segment_sec", 1.0, 0.0),
+            ("max_segment_sec", 18.0, 0.0),
+            ("drain_timeout_sec", 3.0, 0.0),
+        ):
+            value, changed = _validate_numeric(
+                streaming_kwargs[field_name], name=f"streaming.{field_name}",
+                default=default, low=low, low_inclusive=False,
+            )
+            if changed:
+                streaming_kwargs[field_name] = value
+                rebuild_streaming = True
+        overlap, changed = _validate_numeric(
+            streaming_kwargs["overlap_ms"], name="streaming.overlap_ms",
+            default=200, low=0, integer=True,
+        )
+        if changed:
+            streaming_kwargs["overlap_ms"] = int(overlap)
+            rebuild_streaming = True
+        if streaming_kwargs["max_segment_sec"] <= streaming_kwargs["min_segment_sec"]:
+            logger.warning(
+                "streaming.max_segment_sec (%r) must exceed min_segment_sec (%r); resetting to 18.0",
+                streaming_kwargs["max_segment_sec"], streaming_kwargs["min_segment_sec"],
+            )
+            streaming_kwargs["max_segment_sec"] = 18.0
+            rebuild_streaming = True
+        if streaming_kwargs["finalize_pause_sec"] >= vad_cfg.silence_duration_sec:
+            logger.warning(
+                "streaming.finalize_pause_sec (%r) must be shorter than "
+                "vad.silence_duration_sec (%r); resetting to 0.7",
+                streaming_kwargs["finalize_pause_sec"], vad_cfg.silence_duration_sec,
+            )
+            streaming_kwargs["finalize_pause_sec"] = 0.7
+            rebuild_streaming = True
+        streaming_cfg = StreamingConfig(**streaming_kwargs) if rebuild_streaming else cfg.streaming
+
         # Cross-check: learned terms are written by the learner but read by jargon.
         if cfg.learning.enabled and cfg.jargon.learned_path is not None:
             write_path = Path(cfg.learning.learned_path)
@@ -329,6 +403,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             audio=audio_cfg,
             vad=vad_cfg,
             stt=stt_cfg,
+            streaming=streaming_cfg,
             jargon=jargon_cfg,
             hotkey=hotkey_cfg,
             output=cfg.output,
