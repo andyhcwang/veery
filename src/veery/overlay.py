@@ -952,6 +952,46 @@ def _request_microphone() -> None:
         logger.debug("Could not request microphone access")
 
 
+def _request_accessibility() -> None:
+    """Trigger the macOS Accessibility prompt (creates a FRESH TCC row).
+
+    Critical after the app bundle was replaced: the old row's stored
+    code-signing requirement no longer matches the new binary, so its
+    checkbox is silently ignored. Prompting makes macOS register this
+    binary itself.
+    """
+    try:
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions,
+            kAXTrustedCheckOptionPrompt,
+        )
+
+        AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+    except Exception:
+        logger.debug("Could not request accessibility access", exc_info=True)
+
+
+def _request_input_monitoring() -> None:
+    """Trigger the macOS Input Monitoring prompt (creates a FRESH TCC row)."""
+    try:
+        iokit = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/IOKit.framework/IOKit")
+        iokit.IOHIDRequestAccess.restype = ctypes.c_bool
+        iokit.IOHIDRequestAccess.argtypes = [ctypes.c_int]
+        iokit.IOHIDRequestAccess(1)  # kIOHIDRequestTypeListenEvent
+    except Exception:
+        logger.debug("Could not request input monitoring access", exc_info=True)
+
+
+def _request_permission_for_step(step_index: int) -> None:
+    """Fire the system permission prompt matching a guide step."""
+    if step_index == 0:
+        _request_accessibility()
+    elif step_index == 1:
+        _request_microphone()
+    elif step_index == 2:
+        _request_input_monitoring()
+
+
 def _check_input_monitoring() -> bool:
     """Check if Input Monitoring is granted by attempting to create an event tap.
 
@@ -1258,8 +1298,7 @@ class PermissionGuideOverlay:
                 step_index = self._pending_steps[self._current_step]
                 step = _PERM_STEPS[step_index]
                 self._open_settings(step["settings_url"])
-                if step_index == 1:
-                    _request_microphone()
+                _request_permission_for_step(step_index)
             return
 
         # macOS caches TCC verdicts per process: a grant made while the app
@@ -1359,9 +1398,9 @@ class PermissionGuideOverlay:
                 step = _PERM_STEPS[step_index]
                 self._open_settings(step["settings_url"])
 
-                # Trigger microphone prompt if that's the first step
-                if step_index == 1:
-                    _request_microphone()
+                # Trigger the system prompt so macOS registers THIS binary
+                # (fresh TCC row) instead of relying on a possibly-stale one
+                _request_permission_for_step(step_index)
 
                 # Patch the timer callback to route to our _poll_permission
                 bg_view = self._bg_view

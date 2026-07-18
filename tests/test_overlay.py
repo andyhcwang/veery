@@ -418,3 +418,47 @@ class TestStaleGrantRelaunch:
         assert popen.called
         assert "/Applications/Veery.app" in popen.call_args[0][0][-1]
         fake_appkit.NSApplication.sharedApplication.return_value.terminate_.assert_called_once()
+
+
+class TestPermissionPrompts:
+    """Step transitions fire the matching system permission prompt."""
+
+    def test_step_dispatch(self):
+        import veery.overlay as mod
+
+        with (
+            patch.object(mod, "_request_accessibility") as ax,
+            patch.object(mod, "_request_microphone") as mic,
+            patch.object(mod, "_request_input_monitoring") as im,
+        ):
+            mod._request_permission_for_step(0)
+            mod._request_permission_for_step(1)
+            mod._request_permission_for_step(2)
+        ax.assert_called_once()
+        mic.assert_called_once()
+        im.assert_called_once()
+
+    def test_poll_advance_requests_next_permission(self):
+        from veery.overlay import PermissionGuideOverlay
+
+        overlay = PermissionGuideOverlay()
+        overlay._pending_steps = [0, 2]
+        overlay._current_step = 0
+        with (
+            patch("veery.overlay._check_accessibility", return_value=True),
+            patch.object(overlay, "_update_step_content"),
+            patch.object(overlay, "_open_settings"),
+            patch("veery.overlay._request_permission_for_step") as req,
+        ):
+            overlay._poll_permission()
+        req.assert_called_once_with(2)
+
+    def test_request_helpers_never_raise(self):
+        import veery.overlay as mod
+
+        with patch("veery.overlay.ctypes.cdll.LoadLibrary", side_effect=OSError("no lib")):
+            mod._request_input_monitoring()  # must not raise
+        import sys
+
+        with patch.dict(sys.modules, {"ApplicationServices": None}):
+            mod._request_accessibility()  # ImportError path must not raise

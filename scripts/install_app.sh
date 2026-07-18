@@ -26,8 +26,22 @@ if [[ ! -d "$APP_SRC" ]]; then
 fi
 
 echo "==> Installing to $APP_DST..."
+NEW_HASH=$(codesign -dvvv "$APP_SRC" 2>&1 | awk -F= '/^CDHash/{print $2}')
+OLD_HASH=""
+if [[ -d "$APP_DST" ]]; then
+    OLD_HASH=$(codesign -dvvv "$APP_DST" 2>&1 | awk -F= '/^CDHash/{print $2}')
+fi
 rm -rf "$APP_DST"
 ditto "$APP_SRC" "$APP_DST"
+
+# TCC stores a code-signing requirement per permission row. Replacing the app
+# with a differently-hashed (ad-hoc) binary leaves stale rows whose checkbox
+# shows enabled but is silently ignored — clear them so first launch prompts
+# fresh instead of appearing stuck.
+if [[ -n "$OLD_HASH" && "$OLD_HASH" != "$NEW_HASH" ]]; then
+    echo "==> App binary changed — clearing stale permission grants (re-grant on next launch)"
+    tccutil reset All io.github.andyhcwang.veery >/dev/null 2>&1 || true
+fi
 
 echo ""
 echo "Done. Press Cmd+Space and type 'Veery' to launch."
