@@ -1372,3 +1372,116 @@ class TestStreamingReleasePath:
         app._state = State.IDLE
         app._begin_recording()
         assert app._streaming_session is None
+
+
+# ---------------------------------------------------------------------------
+# Edit-capture quality (label pollution guards)
+# ---------------------------------------------------------------------------
+
+
+class TestEditCaptureQuality:
+    def test_suppression_window_ignores_synthetic_keys(self, app) -> None:
+        """Our own CGEvent-typed output must not count as manual edits."""
+        app._begin_manual_edit_monitor("sharp ratio")
+        app._suppress_edits_until = time.monotonic() + 5.0
+        for ch in " and more":
+            app._on_global_key_press(FakeCharKey(ch))
+        assert app._manual_edit_session.edit_count == 0
+        app._suppress_edits_until = 0.0
+        app._finalize_manual_edit_learning()
+        app._learner.log_correction.assert_not_called()
+
+    def test_append_only_typing_is_not_a_correction(self, app) -> None:
+        """New content typed after the paste is writing, not a correction."""
+        app._begin_manual_edit_monitor("sharp ratio")
+        for ch in " is high.":
+            app._on_global_key_press(FakeCharKey(ch))
+        app._finalize_manual_edit_learning()
+        app._learner.log_correction.assert_not_called()
+
+    def test_ime_residue_discards_session(self, app) -> None:
+        """Raw pinyin in the reconstructed buffer must not become a label."""
+        app._begin_manual_edit_monitor("算一下我们平均的市场参与率")
+        with app._manual_edit_lock:
+            app._manual_edit_session.text = "算一下我们平均的市场jiaoyil 参与率"
+            app._manual_edit_session.edit_count = 7
+        app._finalize_manual_edit_learning()
+        app._learner.log_correction.assert_not_called()
+
+    def test_enter_finalizes_without_newline(self, app) -> None:
+        """Enter submits: finalize with the pre-Enter buffer, no '\\n' insertion."""
+        app._learner.log_correction.return_value = None
+        app._begin_manual_edit_monitor("sharp ratio")
+        app._on_global_key_press("Key.cmd")
+        app._on_global_key_press("Key.left")
+        app._on_global_key_release("Key.cmd")
+        for _ in range(5):
+            app._on_global_key_press("Key.right")
+        app._on_global_key_press(FakeCharKey("e"))
+        app._on_global_key_press("Key.enter")
+        assert app._manual_edit_session is None
+        app._learner.log_correction.assert_called_once_with("sharp ratio", "sharpe ratio")
+
+    def test_enter_without_edits_discards(self, app) -> None:
+        app._begin_manual_edit_monitor("sharp ratio")
+        app._on_global_key_press("Key.enter")
+        assert app._manual_edit_session is None
+        app._learner.log_correction.assert_not_called()
+
+    def test_tab_discards_session(self, app) -> None:
+        app._begin_manual_edit_monitor("sharp ratio")
+        app._on_global_key_press(FakeCharKey("e"))
+        app._on_global_key_press("Key.tab")
+        assert app._manual_edit_session is None
+        app._finalize_manual_edit_learning()
+        app._learner.log_correction.assert_not_called()
+
+    def test_auto_learn_rejects_low_similarity(self, app) -> None:
+        """Consecutive unrelated sentences (~42% similar) must not pair up."""
+        app._last_pasted_text = "sharp ratio"
+        app._last_pasted_time = time.monotonic()
+        with patch("rapidfuzz.fuzz.ratio", return_value=45):
+            app._try_auto_learn("totally different sentence")
+        app._learner.log_correction.assert_not_called()
+
+    def test_auto_learn_accepts_real_redictation(self, app) -> None:
+        """A genuine re-dictation correction (~55% similar) still learns."""
+        app._last_pasted_text = "sharp ratio"
+        app._last_pasted_time = time.monotonic()
+        app._learner.log_correction.return_value = None
+        with patch("rapidfuzz.fuzz.ratio", return_value=55):
+            app._try_auto_learn("Sharpe ratio")
+        app._learner.log_correction.assert_called_once()
+
+
+class TestImeResidueDetector:
+    @pytest.mark.parametrize(
+        "original,edited",
+        [
+            ("算一下我们平均的市场参与率", "算一下我们平均的市场jiaoyil 参与率"),
+            ("方便的呢,入宿空房呢", "方便的呢,dushou 空房呢"),
+            ("收益的时间戳固定成了", "收益的时间戳固定hao "),
+            ("最近短期剩余一半", "最近短期剩余yiban"),
+        ],
+        ids=["mid-word-pinyin", "space-separated-pinyin", "trailing-pinyin", "retyped-word"],
+    )
+    def test_detects_real_pollution_cases(self, original: str, edited: str) -> None:
+        from veery.app import _contains_ime_residue
+
+        assert _contains_ime_residue(original, edited)
+
+    @pytest.mark.parametrize(
+        "original,edited",
+        [
+            ("按照In the stock market, Algrim and Chris.", "按照In the stock market, Algren and Chris."),
+            ("但是呢要有最大的RI", "但是呢要有最大的ROI"),
+            ("基本上是8Bips乘以Turnover", "基本上是8Bps乘以Turnover"),
+            ("是我USTT的理财利率吗", "是我USDT的理财利率吗"),
+            ("讲话也是能够纠正", "降话也是能够纠正"),
+        ],
+        ids=["latin-name", "acronym", "unit-fix", "ticker", "pure-cjk-edit"],
+    )
+    def test_keeps_legitimate_corrections(self, original: str, edited: str) -> None:
+        from veery.app import _contains_ime_residue
+
+        assert not _contains_ime_residue(original, edited)

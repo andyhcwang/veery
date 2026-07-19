@@ -33,6 +33,7 @@ audio:
 
 # output:
 #   cgevent_char_limit: 150
+#   chinese_variant: "simplified"  # Normalize Whisper's random Traditional/Simplified mix ("simplified", "traditional", "off")
 
 streaming:
   enabled: true                   # Transcribe segments during pauses while you hold the key

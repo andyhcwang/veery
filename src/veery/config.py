@@ -143,6 +143,9 @@ class OutputConfig:
     # long text is visibly slow in apps that process keystrokes one by one.
     cgevent_char_limit: int = 150
     paste_delay_ms: int = 50  # Post-Cmd+V wait before clipboard restore (values <150 clamped to 150; see output.py)
+    # Whisper randomly mixes Traditional/Simplified Han for Mandarin speech;
+    # normalize every dictation to one script. "simplified" | "traditional" | "off"
+    chinese_variant: str = "simplified"
 
 
 @dataclass(frozen=True)
@@ -447,6 +450,17 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             rebuild_history = True
         history_cfg = HistoryConfig(**history_kwargs) if rebuild_history else cfg.history
 
+        output_cfg = cfg.output
+        if cfg.output.chinese_variant not in ("simplified", "traditional", "off"):
+            logger.warning(
+                "output.chinese_variant must be 'simplified', 'traditional', or 'off' "
+                "(got %r), resetting to 'simplified'",
+                cfg.output.chinese_variant,
+            )
+            output_kwargs = dict(vars(cfg.output))
+            output_kwargs["chinese_variant"] = "simplified"
+            output_cfg = OutputConfig(**output_kwargs)
+
         return AppConfig(
             audio=audio_cfg,
             vad=vad_cfg,
@@ -454,7 +468,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             streaming=streaming_cfg,
             jargon=jargon_cfg,
             hotkey=hotkey_cfg,
-            output=cfg.output,
+            output=output_cfg,
             learning=cfg.learning,
             history=history_cfg,
         )

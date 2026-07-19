@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from veery.config import PROJECT_ROOT, JargonConfig
-from veery.corrector import TextCorrector, remove_fillers
+from veery.corrector import TextCorrector, normalize_han, remove_fillers
 from veery.jargon import JargonCorrector
 
 QUANT_DICT = str(PROJECT_ROOT / "jargon" / "quant_finance.yaml")
@@ -170,3 +170,47 @@ class TestFillerRemoval:
         assert "um" not in result.final.lower()
         assert "uh" not in result.final.lower()
         assert "Sharpe ratio" in result.final
+
+
+# ---------------------------------------------------------------------------
+# Han script normalization tests
+# ---------------------------------------------------------------------------
+
+
+class TestHanNormalization:
+    def test_traditional_converted_to_simplified(self, jargon_corrector: JargonCorrector) -> None:
+        corrector = TextCorrector(jargon_corrector, chinese_variant="simplified")
+        result = corrector.correct("講話也是能夠糾正")
+        assert result.final == "讲话也是能够纠正"
+
+    def test_simplified_passes_through(self, jargon_corrector: JargonCorrector) -> None:
+        corrector = TextCorrector(jargon_corrector, chinese_variant="simplified")
+        result = corrector.correct("讲话也是能够纠正")
+        assert result.final == "讲话也是能够纠正"
+
+    def test_phrase_aware_conversion(self) -> None:
+        # 乾杯 -> 干杯, but 乾坤 keeps 乾 (phrase tables, not per-char mapping)
+        assert normalize_han("乾杯和乾坤", "simplified") == "干杯和乾坤"
+
+    def test_latin_text_untouched(self, jargon_corrector: JargonCorrector) -> None:
+        corrector = TextCorrector(jargon_corrector, chinese_variant="simplified")
+        result = corrector.correct("the Kubernetes API 保持不變")
+        assert "Kubernetes" in result.final
+        assert "保持不变" in result.final
+
+    def test_off_disables_conversion(self, jargon_corrector: JargonCorrector) -> None:
+        corrector = TextCorrector(jargon_corrector, chinese_variant="off")
+        result = corrector.correct("能夠糾正")
+        assert result.final == "能夠糾正"
+
+    def test_traditional_variant(self) -> None:
+        assert normalize_han("讲话", "traditional") == "講話"
+
+    def test_raw_preserves_original(self, jargon_corrector: JargonCorrector) -> None:
+        corrector = TextCorrector(jargon_corrector, chinese_variant="simplified")
+        result = corrector.correct("能夠糾正")
+        assert result.raw == "能夠糾正"
+
+    def test_default_is_simplified(self, jargon_corrector: JargonCorrector) -> None:
+        corrector = TextCorrector(jargon_corrector)
+        assert corrector.correct("糾正").final == "纠正"

@@ -250,6 +250,20 @@ class TestConfigFromYAML:
         assert config.jargon.fuzzy_threshold == 90
         assert config.output.cgevent_char_limit == 1000
 
+    def test_chinese_variant_valid_value(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("output:\n  chinese_variant: \"off\"\n")
+        config = load_config(config_file)
+        assert config.output.chinese_variant == "off"
+
+    def test_chinese_variant_invalid_resets_to_simplified(self, tmp_path: Path, caplog) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("output:\n  chinese_variant: \"pinyin\"\n")
+        with caplog.at_level(logging.WARNING):
+            config = load_config(config_file)
+        assert config.output.chinese_variant == "simplified"
+        assert "chinese_variant" in caplog.text
+
     def test_legacy_max_duration_maps_to_wait_timeout(self, tmp_path: Path, caplog) -> None:
         yaml_content = textwrap.dedent("""\
             audio:

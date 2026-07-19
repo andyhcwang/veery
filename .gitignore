@@ -37,3 +37,4 @@ jargon/mined.yaml
 jargon/learned.yaml
 jargon/usage_stats.yaml
 history/
+*.bak-*

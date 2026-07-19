@@ -104,7 +104,7 @@ def main() -> None:
     from veery.jargon import JargonCorrector, JargonUsageTracker
     from veery.stt import WhisperSTT, create_stt
 
-    corrector = TextCorrector(JargonCorrector(cfg.jargon))
+    corrector = TextCorrector(JargonCorrector(cfg.jargon), cfg.output.chinese_variant)
     try:
         stats_path = Path(cfg.jargon.learned_path or "jargon/learned.yaml")
         if not stats_path.is_absolute():

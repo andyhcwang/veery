@@ -34,6 +34,25 @@ _NAGE_STUTTER = re.compile(r"(?:那个\s*){2,}")
 # Clean up multiple spaces left after removal
 _MULTI_SPACE = re.compile(r"  +")
 
+# Whisper picks Traditional or Simplified Han per utterance almost at random
+# for Mandarin speech; normalize to one script so output is consistent and
+# jargon matching sees the same characters the dictionaries use.
+_ZH_LOCALE = {"simplified": "zh-cn", "traditional": "zh-tw"}
+
+
+def normalize_han(text: str, variant: str) -> str:
+    """Convert Han characters to one script variant ("off" passes through)."""
+    locale = _ZH_LOCALE.get(variant)
+    if not locale or not text:
+        return text
+    try:
+        from zhconv import convert
+
+        return convert(text, locale)
+    except Exception:
+        logger.exception("Han script normalization failed, using original text")
+        return text
+
 
 def remove_fillers(text: str) -> str:
     """Remove common filler words/sounds from transcribed text."""
@@ -53,10 +72,11 @@ class CorrectionResult:
 
 
 class TextCorrector:
-    """Orchestrates the correction pipeline: jargon -> fillers."""
+    """Orchestrates the correction pipeline: han script -> jargon -> fillers."""
 
-    def __init__(self, jargon: JargonCorrector) -> None:
+    def __init__(self, jargon: JargonCorrector, chinese_variant: str = "simplified") -> None:
         self._jargon = jargon
+        self._chinese_variant = chinese_variant
 
     @property
     def jargon(self) -> JargonCorrector:
@@ -67,13 +87,19 @@ class TextCorrector:
         if not raw_text:
             return CorrectionResult(raw="", jargon_corrected="", final="")
 
+        # Stage 0: Han script normalization (before jargon so fuzzy matching
+        # sees the same script the dictionaries are written in)
+        normalized = normalize_han(raw_text, self._chinese_variant)
+        if normalized != raw_text:
+            logger.debug("Han normalization: %r -> %r", raw_text, normalized)
+
         # Stage 1: Jargon correction
         try:
-            jargon_corrected = self._jargon.correct(raw_text)
+            jargon_corrected = self._jargon.correct(normalized)
         except Exception:
             logger.exception("Jargon correction failed, using raw text")
-            jargon_corrected = raw_text
-        logger.debug("Jargon stage: %r -> %r", raw_text, jargon_corrected)
+            jargon_corrected = normalized
+        logger.debug("Jargon stage: %r -> %r", normalized, jargon_corrected)
 
         # Stage 2: Filler word removal
         final = remove_fillers(jargon_corrected)

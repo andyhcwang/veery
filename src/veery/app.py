@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 import functools
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -77,6 +78,18 @@ _MODIFIER_KEYS = {
 }
 _CMD_MODIFIERS = {"Key.cmd", "Key.cmd_l", "Key.cmd_r"}
 _ALT_MODIFIERS = {"Key.alt", "Key.alt_l", "Key.alt_r"}
+
+# Raw pinyin left in a reconstructed edit buffer: a fresh all-lowercase ASCII
+# run next to (optionally whitespace-separated from) a CJK char. Deliberate
+# English insertions in mixed text are overwhelmingly capitalized or acronyms
+# (Algren, ROI, USDT), which this pattern does not match. False positives only
+# cost a learning label — they never alter output text.
+_IME_RESIDUE = re.compile(r"[一-鿿]\s*[a-z]{2,}|[a-z]{2,}\s*[一-鿿]")
+
+
+def _contains_ime_residue(original: str, edited: str) -> bool:
+    """True when `edited` gained lowercase-run/CJK junctions absent from `original`."""
+    return any(hit not in original for hit in set(_IME_RESIDUE.findall(edited)))
 
 # Maps config key_combo strings to pynput Key attributes and display labels.
 _KEY_COMBO_MAP = {
@@ -372,6 +385,10 @@ class VeeryApp(rumps.App):
         self._manual_edit_session: _ManualEditSession | None = None
         self._manual_edit_lock = threading.Lock()
         self._modifier_keys_down: set[str] = set()
+        # Our own CGEvent-typed output arrives at the global key listener like
+        # user keystrokes; while this deadline is in the future those events
+        # must not be recorded as manual edits (they would corrupt learning).
+        self._suppress_edits_until: float = 0.0
 
         # Signals that recording stream is actually open and capturing audio
         self._recording_started = threading.Event()
@@ -419,7 +436,7 @@ class VeeryApp(rumps.App):
         # 2. Jargon + corrector (lightweight, no model download)
         try:
             jargon = JargonCorrector(self._config.jargon)
-            self._corrector = TextCorrector(jargon)
+            self._corrector = TextCorrector(jargon, self._config.output.chinese_variant)
             logger.info("TextCorrector initialized")
         except Exception:
             logger.exception("Failed to initialize TextCorrector")
@@ -836,6 +853,12 @@ class VeeryApp(rumps.App):
                 self._modifier_keys_down.add(key_value)
             return
 
+        # Ignore our own synthetic output events (CGEvent typing / Cmd+V):
+        # they are not user edits. Modifier bookkeeping above still runs so
+        # the state stays accurate across the suppression window.
+        if time.monotonic() < self._suppress_edits_until:
+            return
+
         should_finalize = False
         should_discard = False
         now = time.monotonic()
@@ -853,6 +876,8 @@ class VeeryApp(rumps.App):
                 status = self._apply_manual_edit_key_locked(session, key_kind, key_value)
                 if status == "discard":
                     should_discard = True
+                elif status == "finalize":
+                    should_finalize = True
                 elif status == "tracked":
                     session.last_event_at = now
 
@@ -910,10 +935,22 @@ class VeeryApp(rumps.App):
         if not edited or original.strip().lower() == edited.strip().lower():
             return
 
+        # Typing NEW content after the paste is continued writing, not a
+        # correction of the dictation — nothing in the original changed.
+        if edited.rstrip().startswith(original.rstrip()):
+            return
+
+        # Chinese IME input reaches the key listener as raw pinyin letters
+        # (the committed hanzi never generate key events), so a buffer with
+        # fresh lowercase runs glued to CJK text is a garbage reconstruction.
+        if _contains_ime_residue(original, edited):
+            logger.info("Skipping manual learn: edit buffer looks like raw IME composition")
+            return
+
         from rapidfuzz import fuzz
 
         similarity = fuzz.ratio(original.lower(), edited.lower())
-        # Stricter than the re-dictation path (40): the edit buffer is
+        # Stricter than the re-dictation path (50): the edit buffer is
         # reconstructed from keystrokes and cannot see mouse-driven cursor
         # moves, so low-similarity "edits" are often garbage reconstructions
         # that would teach the corrector wrong variant->canonical pairs.
@@ -977,6 +1014,7 @@ class VeeryApp(rumps.App):
         Returns:
             "tracked": key was interpreted and session updated,
             "ignore": key not relevant,
+            "finalize": session should finalize now with the current buffer,
             "discard": session should be discarded (unknown destructive shortcut).
         """
         cmd_active = any(k in self._modifier_keys_down for k in _CMD_MODIFIERS)
@@ -999,18 +1037,15 @@ class VeeryApp(rumps.App):
             return "tracked"
 
         if key_value in {"Key.enter", "Key.return"}:
-            if cmd_active:
-                return "discard"
-            self._insert_at_cursor(session, "\n")
-            session.edit_count += 1
-            return "tracked"
+            # Enter usually submits/sends in dictation targets (chat boxes,
+            # search fields): the pre-Enter buffer is the final edit state.
+            # Reconstructed "\n" insertions were a top source of corrupted
+            # learning labels — never add them to the buffer.
+            return "finalize" if session.edit_count > 0 else "discard"
 
         if key_value == "Key.tab":
-            if cmd_active:
-                return "discard"
-            self._insert_at_cursor(session, "\t")
-            session.edit_count += 1
-            return "tracked"
+            # Tab moves focus; the reconstruction no longer tracks the field.
+            return "discard"
 
         if key_value == "Key.left":
             if cmd_active:
@@ -1657,7 +1692,17 @@ class VeeryApp(rumps.App):
                 return
 
             t_paste = time.monotonic()
-            paste_to_active_app(final_text, self._config.output)
+            # Suppress edit tracking while our synthetic keystrokes are in
+            # flight (plus a grace period for queued listener callbacks).
+            self._suppress_edits_until = float("inf")
+            try:
+                paste_to_active_app(final_text, self._config.output)
+            finally:
+                # Short grace for already-queued listener callbacks; all
+                # synthetic events were posted before this line, so delivery
+                # lag is milliseconds — keep the window small or it would
+                # swallow a fast user's first real edit keys.
+                self._suppress_edits_until = time.monotonic() + 0.2
             timings["paste"] = time.monotonic() - t_paste
             logger.info(
                 "Latency: vad=%dms stt=%dms paste=%dms total=%dms (audio=%.1fs)",
@@ -1784,8 +1829,11 @@ class VeeryApp(rumps.App):
         from rapidfuzz import fuzz
 
         similarity = fuzz.ratio(self._last_pasted_text.lower(), new_text.lower())
-        if similarity < 40:
-            # Too different = likely unrelated new dictation
+        if similarity < 50:
+            # Too different = likely an unrelated new dictation. Real-usage
+            # data: a genuine re-dictation correction scored 55, while two
+            # consecutive unrelated sentences scored 42 and produced a bogus
+            # learning pair — 50 separates the two.
             return
 
         logger.info(
@@ -1805,7 +1853,9 @@ class VeeryApp(rumps.App):
     def _reload_corrector_after_learning(self) -> None:
         """Reload jargon dictionaries so newly promoted terms take effect immediately."""
         try:
-            self._corrector = TextCorrector(JargonCorrector(self._config.jargon))
+            self._corrector = TextCorrector(
+                JargonCorrector(self._config.jargon), self._config.output.chinese_variant
+            )
             self._apply_stt_runtime_hints(self._stt)
             self._ensure_learned_menu_item()
             logger.info("Reloaded TextCorrector after learning update")
