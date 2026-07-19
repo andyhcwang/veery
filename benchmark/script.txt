@@ -1,0 +1,25 @@
+# 前后鼻音
+今天的心情比昨天晴朗很多
+陈老师和程工程师在生产环境定位问题
+人生的意义在于不断进步和创新
+金色的京城在清晨显得格外安静
+村民们明白棚里的粮食今年丰收了
+我们分析一下风控引擎的性能瓶颈
+
+# 快速语句
+这个季度的回测结果显示夏普比率明显提升风险敞口控制得也不错
+我们需要尽快把数据管道的延迟降下来不然下游的模型训练全都要等着
+明天上午十点先开产品评审会然后下午两点做代码走查晚上发布新版本
+
+# 中英混说
+帮我把这个pull request里的API latency优化一下
+用PyTorch训练的模型可以导出成ONNX格式部署
+在Kubernetes集群里把这个service的replica数量调成三个
+这个DataFrame的index需要重新设置一下再做join
+把DuckDB里的行情数据按VWAP重新聚合一遍
+
+# English
+The quarterly backtest shows a significant improvement in the Sharpe ratio.
+Please review the pull request and check the deployment pipeline before merging.
+The latency spike was caused by a misconfigured load balancer in production.
+Let me refactor this function and add proper error handling first.

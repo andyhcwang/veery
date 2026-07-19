@@ -324,6 +324,18 @@ class AudioRecorder:
         self._done_event.set()
         self._manual_stop_event.set()
 
+    def snapshot_capture(self) -> np.ndarray | None:
+        """Full captured audio of the current/most recent recording.
+
+        Used by the dictation-history archive; prefers the VAD buffer, falls
+        back to the raw buffer (VAD-missed captures).
+        """
+        with self._lock:
+            source = self._buffer if self._buffer else self._raw_buffer
+            if not source:
+                return None
+            return np.concatenate(list(source))
+
     def build_tail(self, from_chunk: int) -> AudioSegment | None:
         """Build the residual segment after the last committed streaming cut.
 

@@ -42,3 +42,7 @@ streaming:
 #   overlap_ms: 200               # Audio prepended across cuts so words aren't clipped
 #   drain_timeout_sec: 3.0         # Max wait for in-flight segments at key release
 #   rolling_prompt_chars: 0       # Context conditioning: OFF by default (degraded accuracy on accented speech)
+
+history:
+  enabled: true                   # Archive each dictation (audio+text, local only) for accuracy evaluation
+#   max_records: 500              # Oldest records are deleted beyond this

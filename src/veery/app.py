@@ -21,6 +21,7 @@ from veery import __version__, sounds
 from veery.audio import AudioRecorder, AudioSegment, StopReason
 from veery.config import PROJECT_ROOT, STT_BACKENDS, AppConfig, load_config
 from veery.corrector import TextCorrector
+from veery.history import DictationHistory
 from veery.jargon import JargonCorrector, JargonUsageTracker
 from veery.learner import CorrectionLearner
 from veery.output import paste_to_active_app
@@ -438,6 +439,15 @@ class VeeryApp(rumps.App):
         except Exception:
             logger.exception("Failed to initialize JargonUsageTracker")
             self._usage_tracker = None
+
+        # 2c. Dictation history (accuracy-evaluation archive, opt-in)
+        self._history: DictationHistory | None = None
+        if self._config.history.enabled:
+            try:
+                self._history = DictationHistory(self._config.history)
+                logger.info("DictationHistory enabled")
+            except Exception:
+                logger.exception("Failed to initialize DictationHistory")
 
         # 3. Correction learner
         if self._config.learning.enabled:
@@ -913,6 +923,12 @@ class VeeryApp(rumps.App):
 
         self._last_pasted_text = edited
         self._last_pasted_time = time.monotonic()
+
+        if self._history is not None:
+            try:
+                self._history.log_correction(original, edited)
+            except Exception:
+                logger.debug("Could not label history from manual edit", exc_info=True)
 
         correction_phrase = self._extract_manual_correction_candidate(original, edited)
         if correction_phrase is None:
@@ -1661,6 +1677,10 @@ class VeeryApp(rumps.App):
                 self._record_jargon_usage(final_text)
             except Exception:
                 logger.exception("Jargon usage tracking failed")
+            try:
+                self._archive_dictation(segment, raw_text, final_text)
+            except Exception:
+                logger.exception("History archive failed")
             self._last_pasted_text = final_text
             self._last_pasted_time = time.monotonic()
             self._begin_manual_edit_monitor(final_text)
@@ -1700,6 +1720,24 @@ class VeeryApp(rumps.App):
                     self._set_detail(
                         f"Ready \u2014 {n} dictation{'s' if n != 1 else ''} this session",
                     )
+
+    def _archive_dictation(
+        self, segment: AudioSegment | None, raw_text: str, final_text: str
+    ) -> None:
+        """Archive audio + transcripts for accuracy evaluation (opt-in)."""
+        if self._history is None:
+            return
+        audio = None
+        if self._recorder is not None:
+            try:
+                audio = self._recorder.snapshot_capture()
+            except Exception:
+                logger.debug("Could not snapshot capture for history", exc_info=True)
+        if audio is None and segment is not None:
+            audio = segment.audio
+        if audio is None or audio.size == 0:
+            return
+        self._history.save(audio, self._config.audio.sample_rate, raw_text, final_text)
 
     def _record_jargon_usage(self, final_text: str) -> None:
         """Track which canonical jargon terms appeared in the final output.
@@ -1754,6 +1792,11 @@ class VeeryApp(rumps.App):
             "Auto-correction detected (%.0f%% similar, %.1fs ago): '%s' -> '%s'",
             similarity, elapsed, self._last_pasted_text, new_text,
         )
+        if self._history is not None:
+            try:
+                self._history.log_correction(self._last_pasted_text, new_text)
+            except Exception:
+                logger.debug("Could not label history from re-dictation", exc_info=True)
         promoted = self._learner.log_correction(self._last_pasted_text, new_text)
         if promoted is not None:
             self._reload_corrector_after_learning()
@@ -1984,6 +2027,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Veery bilingual dictation")
     parser.add_argument("--mine", nargs="+", metavar="PATH",
                         help="Scan paths for potential jargon terms")
+    parser.add_argument("--eval", action="store_true",
+                        help="Score dictation accuracy from history (user-corrected records)")
+    parser.add_argument("--eval-script", metavar="PATH",
+                        help="Score history against a benchmark reading script (implies --eval)")
     parser.add_argument("--mine-output", metavar="PATH", default="jargon/mined.yaml",
                         help="Output path for mined jargon YAML (default: jargon/mined.yaml)")
     args = parser.parse_args()
@@ -2009,6 +2056,12 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=handlers,
     )
+
+    if args.eval or args.eval_script:
+        from veery.evaluate import run_eval
+
+        run_eval(load_config(), script_path=args.eval_script)
+        return
 
     if args.mine:
         from veery.miner import (

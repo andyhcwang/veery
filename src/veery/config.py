@@ -97,6 +97,19 @@ class StreamingConfig:
 
 
 @dataclass(frozen=True)
+class HistoryConfig:
+    """Local dictation archive powering accuracy evaluation.
+
+    Fully local, capped. User corrections (manual edits / re-dictation)
+    become ground-truth labels for `veery --eval`.
+    """
+
+    enabled: bool = False
+    dir: str = "history"
+    max_records: int = 500
+
+
+@dataclass(frozen=True)
 class JargonConfig:
     dict_paths: tuple[str, ...] = (
         "jargon/quant_finance.yaml",
@@ -142,6 +155,7 @@ class AppConfig:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
+    history: HistoryConfig = field(default_factory=HistoryConfig)
 
 
 def _filter_keys(cls: type, raw: dict) -> dict:
@@ -228,6 +242,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             hotkey=HotkeyConfig(**_filter_keys(HotkeyConfig, raw.get("hotkey", {}))),
             output=OutputConfig(**_filter_keys(OutputConfig, raw.get("output", {}))),
             learning=LearningConfig(**_filter_keys(LearningConfig, raw.get("learning", {}))),
+            history=HistoryConfig(**_filter_keys(HistoryConfig, raw.get("history", {}))),
         )
 
         # Validate audio config.
@@ -414,6 +429,24 @@ def load_config(config_path: Path | None = None) -> AppConfig:
                     read_path,
                 )
 
+        history_kwargs = dict(vars(cfg.history))
+        rebuild_history = False
+        if not isinstance(cfg.history.enabled, bool):
+            logger.warning(
+                "history.enabled must be a boolean (got %r), resetting to False",
+                cfg.history.enabled,
+            )
+            history_kwargs["enabled"] = False
+            rebuild_history = True
+        max_records, changed = _validate_numeric(
+            history_kwargs["max_records"], name="history.max_records",
+            default=500, low=10, integer=True,
+        )
+        if changed:
+            history_kwargs["max_records"] = int(max_records)
+            rebuild_history = True
+        history_cfg = HistoryConfig(**history_kwargs) if rebuild_history else cfg.history
+
         return AppConfig(
             audio=audio_cfg,
             vad=vad_cfg,
@@ -423,6 +456,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             hotkey=hotkey_cfg,
             output=cfg.output,
             learning=cfg.learning,
+            history=history_cfg,
         )
     except Exception:
         logger.warning("Failed to parse %s, using defaults", config_path, exc_info=True)
