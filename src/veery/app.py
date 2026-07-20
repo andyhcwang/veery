@@ -114,19 +114,37 @@ class _ManualEditSession:
     edit_count: int = 0
 
 
+# Tokens for hallucination detection: Latin/digit runs per word, CJK per
+# character, punctuation dropped. Both matter, from real incidents: text.split()
+# counted 'Rumple,' and 'Rumple' as different words (60+26 of 86 -> both below
+# the 85% bar), and spaceless CJK loops ('对对对对…') split into a single
+# "word" that could never reach the length gate.
+_HALLU_TOKEN_RE = re.compile(r"[a-zA-Z0-9']+|[一-鿿]")
+
+
 def _is_repetitive_hallucination(text: str) -> bool:
     """Detect repetitive Whisper hallucination (e.g. 'Why Why Why...').
 
-    Returns True when a single word accounts for >85% of an 8+ word sequence.
-    Real hallucination loops repeat dozens of times; the length gate lets
-    short deliberate repetition (<=7 words) through, while 8+ near-identical
-    words are treated as hallucination.
+    True when one token accounts for >85% of an 8+ token sequence, or when a
+    2-4 token phrase loop ('thank you thank you…', '谢谢大家谢谢大家…') covers
+    >85% of a 12+ token sequence. Whisper's temperature ladder returns its
+    last decode unconditionally when every rung fails quality checks, so this
+    is the final gate keeping loops out of the paste. Short deliberate
+    repetition (<=7 tokens) always passes.
     """
-    words = text.split()
-    if len(words) < 8:
+    tokens = [t.lower() for t in _HALLU_TOKEN_RE.findall(text)]
+    n = len(tokens)
+    if n < 8:
         return False
-    most_common_count = max(Counter(w.lower() for w in words).values())
-    return most_common_count / len(words) > 0.85
+    if max(Counter(tokens).values()) / n > 0.85:
+        return True
+    for size in (2, 3, 4):
+        if n < max(12, 4 * size):
+            continue
+        grams = Counter(tuple(tokens[i : i + size]) for i in range(n - size + 1))
+        if grams.most_common(1)[0][1] * size / n > 0.85:
+            return True
+    return False
 
 
 class State(enum.Enum):

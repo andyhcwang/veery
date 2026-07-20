@@ -63,6 +63,39 @@ class TestIsRepetitiveHallucination:
             "我们 today 讨论 the project plan together"
         ) is False
 
+    def test_real_incident_comma_separated_loop(self) -> None:
+        """2026-07-20 incident: 'Rumple, ' x60 + 'Rumple ' x26 pasted into chat.
+
+        text.split() saw 'rumple,' (60) and 'rumple' (26) as different words,
+        each below the 85% bar. Punctuation-free tokens must catch it.
+        """
+        incident = ", ".join(["Rumple"] * 60) + ", " + " ".join(["Rumple"] * 26)
+        assert _is_repetitive_hallucination(incident) is True
+
+    def test_spaceless_cjk_single_char_loop(self) -> None:
+        """Pure CJK loops have no spaces; per-char tokens must catch them."""
+        assert _is_repetitive_hallucination("对" * 20) is True
+
+    def test_spaceless_cjk_phrase_loop(self) -> None:
+        assert _is_repetitive_hallucination("谢谢大家" * 5) is True
+
+    def test_english_phrase_loop(self) -> None:
+        assert _is_repetitive_hallucination("thank you " * 8) is True
+
+    def test_normal_chinese_sentence_not_flagged(self) -> None:
+        assert _is_repetitive_hallucination(
+            "这样的话我们的回测框架不断地去改变这个目标然后就可以知道策略的表现"
+        ) is False
+
+    def test_deliberate_short_cjk_repetition_passes(self) -> None:
+        """好了 x4 (8 tokens) is plausible speech — phrase gate needs 12+."""
+        assert _is_repetitive_hallucination("好了好了好了好了") is False
+
+    def test_chinese_with_common_particles_not_flagged(self) -> None:
+        assert _is_repetitive_hallucination(
+            "我说的的确确是的因为的话是的没错的呀"
+        ) is False
+
     def test_hallucination_discards_in_process_segment(self, app) -> None:
         """Integration: hallucination is discarded and shows correct warning."""
         from veery.app import State
